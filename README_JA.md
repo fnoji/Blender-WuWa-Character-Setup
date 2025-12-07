@@ -1,3 +1,5 @@
+<img width="1913" height="1000" alt="スクリーンショット 2025-12-08 001448" src="https://github.com/user-attachments/assets/4c202b14-4e40-4988-9e35-5ed10831c15d" />
+
 [ 🇺🇸 **English** ](README.md)
 
 # Blender用 WuWa Character Setup
@@ -5,7 +7,7 @@
 **WuWa Character Setup** は、モデルやシェーダーの設定を容易に設定するBlenderアドオンです。
 鳴潮（Wuthering Waves）のキャラクターのUEmodelをBlenderにインポートし、シェーディングとリギングまでの全工程を自動化します。シェーディングの自動設定、Rigifyによるリギング、および顔の表情コントロールのセットアップ機能を提供します。
 
-このアドオンはDiscord上のユーザーのAkatsukiにて開発され、当方がメンテナーに加わった関係上初版からGithubにて公開を行っています。
+このアドオンはDiscord上のユーザーのAkatsukiにて開発され、当方がバージョン1.4からメンテナーに加わった関係上、初版からGithubにて公開を行っています。
 シェーディングに利用されるシェーダーはJaredNytsが作成した[Wuthering Wavesモデルに最適化されたシェーダー](https://discord.com/channels/894925535870865498/1213552094678614038/1272958039221338114)となります。
 リグとフェイスリグに利用されているスクリプトの源流はScheinzeが[作成したもの](https://discord.com/channels/894925535870865498/1320434868806615122/1320434868806615122)で、最終版から当方が最適化しています。
 フェイスパネルで参照されるものはMicchiが[作成したもの](https://discord.com/channels/894925535870865498/1216442545782132746/1216442545782132746)です。
