@@ -34,7 +34,7 @@ logger.propagate = False
 bl_info = {
     "name": "Shader (.fbx / .uemodel)",
     "author": "Akatsuki",
-    "version": (1, 2),
+    "version": (1, 3),
     "blender": (4, 1, 1),
     "location": "View3D > UI > Wuthering Waves",
     "description": "Import and map shaders/textures for Wuthering Waves characters",
@@ -2003,7 +2003,8 @@ class WW_OT_Rigify(bpy.types.Operator):
             ('Hair', 16, 11),
             ('Cloth', 17, 11),
             ('Skirt', 18, 11),
-            ('Root', 19, 12),
+            ('Tail', 19, 11),
+            ('Root', 20, 12),
         ]
         self.process_bone_collections_and_rigify(armature, bone_data)
         bpy.ops.armature.collection_add()
@@ -2138,6 +2139,8 @@ class WW_OT_Rigify(bpy.types.Operator):
             "ORG-Bip001Forearm.L": "DEF-Bip001Forearm.L",
             "ORG-Bip001ForeTwist.L": "DEF-Bip001Forearm.L.001",
             "ORG-Bip001ForeTwist1.L": "DEF-Bip001Forearm.L.001",
+            "ORG-Bone_HandTwist_L": "DEF-Bip001Forearm.L.001",
+            "ORG-Bip001ForeTwist2.L": "DEF-Bip001Forearm.L.001",
             "ORG-Bip001_L_Elbow_F": "DEF-Bip001UpperArm.L.001",
             "ORG-Bip001_L_Elbow_B": "DEF-Bip001UpperArm.L.001",
             "ORG-Bip001UpArmTwist.R": "DEF-Bip001UpperArm.R",
@@ -2147,6 +2150,8 @@ class WW_OT_Rigify(bpy.types.Operator):
             "ORG-Bip001Forearm.R": "DEF-Bip001Forearm.R",
             "ORG-Bip001ForeTwist.R": "DEF-Bip001Forearm.R.001",
             "ORG-Bip001ForeTwist1.R": "DEF-Bip001Forearm.R.001",
+            "ORG-Bone_HandTwist_R": "DEF-Bip001Forearm.R.001",
+            "ORG-Bip001ForeTwist2.R": "DEF-Bip001Forearm.R.001",
             "ORG-Bip001_R_Elbow_F": "DEF-Bip001UpperArm.R.001",
             "ORG-Bip001_R_Elbow_B": "DEF-Bip001UpperArm.R.001",
             "ORG-Bip001ThighTwist.L": "DEF-Bip001Thigh.L",
@@ -2505,10 +2510,13 @@ class WW_OT_Rigify(bpy.types.Operator):
         bpy.ops.object.mode_set(mode='POSE')
         armature = context.view_layer.objects.active
         keywords_and_collections = [
-            ("Hair", 16), ("Earrings", 16), ("Piao", 17), ("Skirt", 18),
-            ("Trousers", 18), ("Other", 20), ("Weapon", 20), ("Prop", 20),
-            ("Chibang", 20), ("EyeTracker", 0), ("Bip001Neck.001", 21),
-            ("Bip001Head.001", 21), ("Chest", 0), ("Eye.L", 0), ("Eye.R", 0),
+            ("Hair", 16), ("Earrings", 16),
+            ("Piao", 17),
+            ("Skirt", 18), ("Trousers", 18),
+            ("Tail", 19),
+            ("Other", 21), ("Weapon", 21), ("Prop", 21), ("Chibang", 21),
+            ("Bip001Neck.001", 22), ("Bip001Head.001", 22),
+            ("EyeTracker", 0), ("Chest", 0), ("Eye.L", 0), ("Eye.R", 0),
         ]
         for keyword, collection_index in keywords_and_collections:
             self.select_and_move_bones(armature, keyword, collection_index)
@@ -2525,6 +2533,7 @@ class WW_OT_Rigify(bpy.types.Operator):
         context.object.data.collections_all["Hair"].is_visible = False
         context.object.data.collections_all["Cloth"].is_visible = False
         context.object.data.collections_all["Skirt"].is_visible = False
+        context.object.data.collections_all["Tail"].is_visible = False
         bpy.ops.object.mode_set(mode='POSE')
         armature = context.view_layer.objects.active
         pose_bones = armature.pose.bones
