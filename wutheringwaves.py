@@ -1,22 +1,26 @@
 import bpy
-import re
-import os
-import math
+import bmesh
 import logging
+import math
+import os
+import re
+from collections import defaultdict, deque, namedtuple
+from math import cos, pi, sin
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import mathutils
 from mathutils import Vector
-from bpy.types import Panel, Operator, Scene, PropertyGroup
+
 from bpy.props import (
-    StringProperty,
-    CollectionProperty,
     BoolProperty,
+    CollectionProperty,
     FloatProperty,
-    IntProperty,
     FloatVectorProperty,
+    IntProperty,
+    StringProperty,
 )
+from bpy.types import Operator, Panel, PropertyGroup, Scene
 from bpy_extras.io_utils import ImportHelper
-from collections import namedtuple
-from typing import Optional, Dict, List, Set, Tuple, Any
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -30,7 +34,7 @@ logger.propagate = False
 bl_info = {
     "name": "Shader (.fbx / .uemodel)",
     "author": "Akatsuki",
-    "version": (1, 0),
+    "version": (1, 1),
     "blender": (4, 1, 1),
     "location": "View3D > UI > Wuthering Waves",
     "description": "Import and map shaders/textures for Wuthering Waves characters",
@@ -1457,134 +1461,167 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
         )
 
 
-class WW_OT_Rigify(Operator):
+class WW_OT_Rigify(bpy.types.Operator):
     bl_idname = "shader.rigify_armature"
     bl_label = "Rigify"
     bl_description = "Rigify the selected armature with optimized bone structure and collections"
     bl_options = {"REGISTER", "UNDO"}
 
+    left_bone_pairs = [
+        ("Bip001LFinger1", "Bip001LFinger11"),
+        ("Bip001LFinger11", "Bip001LFinger12"),
+        ("Bip001LFinger12", "Bip001LFinger13"),
+        ("Bip001LFinger2", "Bip001LFinger21"),
+        ("Bip001LFinger21", "Bip001LFinger22"),
+        ("Bip001LFinger22", "Bip001LFinger23"),
+        ("Bip001LFinger3", "Bip001LFinger31"),
+        ("Bip001LFinger31", "Bip001LFinger32"),
+        ("Bip001LFinger32", "Bip001LFinger33"),
+        ("Bip001LFinger4", "Bip001LFinger41"),
+        ("Bip001LFinger41", "Bip001LFinger42"),
+        ("Bip001LFinger42", "Bip001LFinger43"),
+    ]
+
+    right_bone_pairs = [
+        ("Bip001RFinger1", "Bip001RFinger11"),
+        ("Bip001RFinger11", "Bip001RFinger12"),
+        ("Bip001RFinger12", "Bip001RFinger13"),
+        ("Bip001RFinger2", "Bip001RFinger21"),
+        ("Bip001RFinger21", "Bip001RFinger22"),
+        ("Bip001RFinger22", "Bip001RFinger23"),
+        ("Bip001RFinger3", "Bip001RFinger31"),
+        ("Bip001RFinger31", "Bip001RFinger32"),
+        ("Bip001RFinger32", "Bip001RFinger33"),
+        ("Bip001RFinger4", "Bip001RFinger41"),
+        ("Bip001RFinger41", "Bip001RFinger42"),
+        ("Bip001RFinger42", "Bip001RFinger43"),
+    ]
+
+    skip_if_finger13 = {
+        ("Bip001LFinger1", "Bip001LFinger11"),
+        ("Bip001LFinger2", "Bip001LFinger21"),
+        ("Bip001LFinger3", "Bip001LFinger31"),
+        ("Bip001LFinger4", "Bip001LFinger41"),
+        ("Bip001RFinger1", "Bip001RFinger11"),
+        ("Bip001RFinger2", "Bip001RFinger21"),
+        ("Bip001RFinger3", "Bip001RFinger31"),
+        ("Bip001RFinger4", "Bip001RFinger41"),
+    }
+
+    ALIGN_THRESHOLD = math.radians(5)
+    TARGET_ANGLE = math.radians(5)
+    STEP_SIZE = 0.001
+    MAX_ITER = 50
+    move_amount = 0.0001
+
     @classmethod
     def poll(cls, context):
-        return context.active_object and context.active_object.type in {'MESH', 'ARMATURE'}
+        if not context.active_object:
+            return False
+        return context.active_object.type in {'MESH', 'ARMATURE'}
 
-    def execute(self, context):
-        selected_object = context.active_object
-        original_selected_object_type = selected_object.type
-        original_selected_object_name = selected_object.name
-        logger.info(f"Starting Rigify process for {selected_object.name}")
+    def validate_scene_objects(self, context):
+        if not context.scene.objects:
+            logger.error("Scene contains no objects")
+            return False
 
-        if selected_object.type == 'MESH':
-            for modifier in selected_object.modifiers:
+        valid_objects = [
+            obj for obj in context.scene.objects if obj.type in {'MESH', 'ARMATURE'}]
+        if not valid_objects:
+            logger.error("Scene contains no mesh or armature objects")
+            return False
+
+        logger.info(
+            f"Scene validation passed - found {len(valid_objects)} valid objects")
+        return True
+
+    def check_if_already_rigged(self, obj):
+        if obj.type == 'MESH':
+            for modifier in obj.modifiers:
                 if modifier.type == 'ARMATURE' and modifier.object:
                     armature_obj = modifier.object
+                    if armature_obj.name.startswith("RIG-"):
+                        logger.warning(
+                            f"Mesh '{obj.name}' is already using a rigified armature '{armature_obj.name}'")
+                        return True
+                    if armature_obj.get('rigify_generated') == True:
+                        logger.warning(
+                            f"Mesh '{obj.name}' is using a Rigify-generated armature '{armature_obj.name}'")
+                        return True
+        elif obj.type == 'ARMATURE':
+            if obj.name.startswith("RIG-"):
+                logger.warning(
+                    f"Armature '{obj.name}' appears to be already rigified")
+                return True
+            if obj.get('rigify_generated') == True:
+                logger.warning(
+                    f"Armature '{obj.name}' is already Rigify-generated")
+                return True
 
-                    if armature_obj.hide_get():
-                        armature_obj.hide_set(False)
-                        logger.info(f"Unhiding armature: {armature_obj.name}")
+        return False
 
-                    context.view_layer.objects.active = armature_obj
-                    selected_object = armature_obj
-                    logger.info(
-                        f"Found armature modifier, switching to {selected_object.name}")
-                    break
-        elif selected_object.type != 'ARMATURE':
-            logger.warning(
-                "No direct armature selected, searching scene for armatures")
-            for obj in context.scene.objects:
-                if obj.type == 'ARMATURE':
-                    if obj.hide_get():
-                        obj.hide_set(False)
-                        logger.info(f"Unhiding armature: {obj.name}")
+    def validate_armature_structure(self, armature_obj):
+        if not armature_obj.data.bones:
+            logger.error(f"Armature '{armature_obj.name}' contains no bones")
+            return False
 
-                    context.view_layer.objects.active = obj
-                    selected_object = obj
-                    logger.info(
-                        f"Found armature in scene: {selected_object.name}")
-                    break
+        required_bones = ['Bip001Pelvis', 'Bip001Spine']
+        missing_bones = [
+            bone for bone in required_bones if bone not in armature_obj.data.bones]
 
-        if selected_object.type != 'ARMATURE':
-            self.report({"ERROR"}, "No armature found to rigify.")
-            logger.error("No armature found for Rigify process")
-            return {"CANCELLED"}
-
-        OrigArmature = selected_object.name
-        RigArmatureName = "RIG-" + OrigArmature
-
-        if RigArmatureName in bpy.data.objects:
-            self.report(
-                {"ERROR"}, f"This armature has already been rigified as '{RigArmatureName}'. Please use the existing rig.")
+        if missing_bones:
             logger.error(
-                f"Rigify process cancelled - {RigArmatureName} already exists")
-            return {"CANCELLED"}
+                f"Armature '{armature_obj.name}' missing required bones: {missing_bones}")
+            return False
 
-        if selected_object.get('rigify_generated') == True:
-            self.report(
-                {"ERROR"}, "This armature is already rigged with Rigify. Please use a different armature.")
-            logger.error(
-                f"Rigify process cancelled - {selected_object.name} is already a Rigify rig")
-            return {"CANCELLED"}
-
-        CharacterMesh = None
-        logger.info("Searching for mesh associated with the armature")
-        for obj in context.scene.objects:
-            if obj.type == 'MESH':
-                for modifier in obj.modifiers:
-                    if modifier.type == 'ARMATURE' and modifier.object and modifier.object.name == OrigArmature:
-                        CharacterMesh = obj
-                        logger.info(
-                            f"Found associated mesh: {CharacterMesh.name}")
-                        break
-                if CharacterMesh:
-                    break
-
-        if not CharacterMesh:
-            self.report(
-                {"ERROR"}, "No mesh found associated with the armature.")
-            logger.error(f"No mesh found for armature {OrigArmature}")
-            return {"CANCELLED"}
-
-        if selected_object.hide_viewport:
-            selected_object.hide_viewport = False
-            logger.info(
-                f"Unhiding viewport visibility for {selected_object.name}")
-
-        if selected_object.hide_get():
-            selected_object.hide_set(False)
-            logger.info(f"Unhiding {selected_object.name} in view layer")
-
-        original_armature_location = selected_object.location.copy()
         logger.info(
-            f"Original armature location: {original_armature_location}")
+            f"Armature structure validation passed for '{armature_obj.name}' - {len(armature_obj.data.bones)} bones found")
+        return True
 
-        selected_object.location = (0, 0, 0)
-        logger.info("Moved armature to origin (0,0,0)")
+    def validate_mesh_vertex_groups(self, mesh_obj):
+        if not mesh_obj.vertex_groups:
+            logger.warning(f"Mesh '{mesh_obj.name}' has no vertex groups")
+            return False
 
-        logger.info("Applying scale transformations to armature")
-        bpy.ops.object.transform_apply(scale=True)
-        rig_armature_object = context.view_layer.objects.active
-        if rig_armature_object and rig_armature_object.type == 'ARMATURE':
-            logger.info("Adjusting spine bones")
-            bpy.ops.object.mode_set(mode='EDIT')
-            spine_bone = rig_armature_object.data.edit_bones.get(
-                "Bip001Spine2")
-            if spine_bone:
-                bone_length = (spine_bone.tail - spine_bone.head).length
-                if bone_length < 0.06:
-                    logger.info(
-                        f"Adjusting spine bone length from {bone_length:.4f} to 0.15")
-                    direction = spine_bone.tail - spine_bone.head
-                    direction.normalize()
-                    spine_bone.tail = spine_bone.head + direction * 0.15
-                    spine_bone.tail.y = spine_bone.head.y
-                    spine_bone.head.z += 0.03
-                    spine_bone.tail.z += 0.03
-            bpy.ops.object.mode_set(mode='OBJECT')
+        bip_groups = [
+            vg for vg in mesh_obj.vertex_groups if vg.name.startswith('Bip001')]
+        if not bip_groups:
+            logger.warning(
+                f"Mesh '{mesh_obj.name}' has no Bip001 vertex groups")
+            return False
 
-        armature = context.object
-        logger.info("Starting finger bone adjustments")
-        bpy.ops.object.mode_set(mode='EDIT')
-        if "Bip001LFinger13" in armature.data.edit_bones:
-            logger.info("Using 3-part finger bone structure")
+        logger.info(
+            f"Mesh vertex groups validation passed for '{mesh_obj.name}' - {len(bip_groups)} Bip001 groups found")
+        return True
+
+    def get_local_x(self, bone):
+        return bone.matrix.to_3x3().col[0].normalized()
+
+    def angle_between(self, v1, v2):
+        if v1.length == 0 or v2.length == 0:
+            return math.pi
+        return v1.angle(v2)
+
+    def all_bone_pairs(self):
+        return self.left_bone_pairs + self.right_bone_pairs
+
+    def check_alignment(self, edit_bones, finger13_exists_left, finger13_exists_right):
+        for name1, name2 in self.all_bone_pairs():
+            if (finger13_exists_left and (name1, name2) in self.skip_if_finger13) or \
+               (finger13_exists_right and (name1, name2) in self.skip_if_finger13):
+                continue
+            b1 = edit_bones.get(name1)
+            b2 = edit_bones.get(name2)
+            if b1 and b2:
+                x1 = self.get_local_x(b1)
+                x2 = self.get_local_x(b2)
+                angle = self.angle_between(x1, x2)
+                if angle < self.ALIGN_THRESHOLD:
+                    return True
+        return False
+
+    def apply_adjustment(self, edit_bones, finger13_exists_left, finger13_exists_right):
+        if finger13_exists_left or finger13_exists_right:
             outward_bones = [
                 "Bip001LFinger11", "Bip001LFinger21", "Bip001LFinger31", "Bip001LFinger41",
                 "Bip001RFinger11", "Bip001RFinger21", "Bip001RFinger31", "Bip001RFinger41"
@@ -1594,7 +1631,6 @@ class WW_OT_Rigify(Operator):
                 "Bip001RFinger13", "Bip001RFinger23", "Bip001RFinger33", "Bip001RFinger43"
             ]
         else:
-            logger.info("Using 2-part finger bone structure")
             outward_bones = [
                 "Bip001LFinger1", "Bip001LFinger2", "Bip001LFinger3", "Bip001LFinger4",
                 "Bip001RFinger1", "Bip001RFinger2", "Bip001RFinger3", "Bip001RFinger4"
@@ -1603,32 +1639,363 @@ class WW_OT_Rigify(Operator):
                 "Bip001LFinger12", "Bip001LFinger22", "Bip001LFinger32", "Bip001LFinger42",
                 "Bip001RFinger12", "Bip001RFinger22", "Bip001RFinger32", "Bip001RFinger42"
             ]
-        move_amount = 0.0014
-        logger.info(f"Adjusting finger bones by {move_amount}")
-        for bone_name in outward_bones:
-            if bone_name in armature.data.edit_bones:
-                bone = armature.data.edit_bones[bone_name]
-                local_x_axis = bone.matrix.to_3x3().col[0].normalized()
-                bone.tail += local_x_axis * move_amount
-        for bone_name in inward_bones:
-            if bone_name in armature.data.edit_bones:
-                bone = armature.data.edit_bones[bone_name]
-                local_x_axis = bone.matrix.to_3x3().col[0].normalized()
-                bone.tail -= local_x_axis * move_amount
-        bpy.ops.object.mode_set(mode='OBJECT')
 
-        logger.info("Clearing existing bone collections")
+        for bone_name in outward_bones:
+            bone = edit_bones.get(bone_name)
+            if bone:
+                x_axis = self.get_local_x(bone)
+                bone.tail += x_axis * self.move_amount
+
+        for bone_name in inward_bones:
+            bone = edit_bones.get(bone_name)
+            if bone:
+                x_axis = self.get_local_x(bone)
+                bone.tail -= x_axis * self.move_amount
+
+    def remove_bone_collections(self, armature):
         if armature.data.collections:
             for collection in armature.data.collections[:]:
                 armature.data.collections.remove(collection)
 
-        logger.info("Calculating bone rolls")
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.armature.select_all(action='SELECT')
-        bpy.ops.armature.calculate_roll(type='CURSOR')
-        bpy.ops.armature.select_all(action='DESELECT')
+    def adjust_bone_positions(self, armature, bone_pairs):
+        for bone1_name, bone2_name in bone_pairs:
+            if bone1_name in armature.data.edit_bones and bone2_name in armature.data.edit_bones:
+                bone1 = armature.data.edit_bones[bone1_name]
+                bone2 = armature.data.edit_bones[bone2_name]
+                bone1.tail = bone2.head
 
-        logger.info("Adjusting bone connections")
+    def set_bone_connect(self, armature, bone_names):
+        for bone_name in bone_names:
+            if bone_name in armature.data.edit_bones:
+                armature.data.edit_bones[bone_name].use_connect = True
+
+    def adjust_bone_roll(self, armature, bones_to_adjust_roll):
+        for bone_name in bones_to_adjust_roll:
+            if bone_name in armature.data.edit_bones:
+                armature.data.edit_bones[bone_name].roll = 0
+
+    def process_bone_collections_and_rigify(self, armature, bone_data):
+        for collection_name, index, row in bone_data:
+            bpy.ops.armature.collection_add()
+            new_collection = armature.data.collections[-1]
+            new_collection.name = collection_name
+            bpy.ops.armature.rigify_collection_set_ui_row(index=index, row=row)
+
+    def modify_bone_rig_type(self, armature, bones_and_rig_types):
+        for bone_name, rig_type, widget_type in bones_and_rig_types:
+            bone = armature.pose.bones.get(bone_name)
+            if bone:
+                armature.data.bones[bone_name].select = True
+                armature.data.bones.active = armature.data.bones[bone_name]
+                bone.rigify_type = rig_type
+                if widget_type and bone.rigify_parameters:
+                    bone.rigify_parameters.super_copy_widget_type = widget_type
+
+    def duplicate_and_adjust_heel_bone(self, armature, foot_bone_name, toe_bone_name, heel_bone_name, rotation_angle=1.5708):
+        if toe_bone_name in armature.data.edit_bones:
+            toe_bone = armature.data.edit_bones[toe_bone_name]
+            heel_bone = armature.data.edit_bones.new(name=heel_bone_name)
+            heel_bone.head = toe_bone.head
+            heel_bone.tail = toe_bone.tail
+            heel_bone.roll = toe_bone.roll
+            rotation_matrix = mathutils.Matrix.Rotation(rotation_angle, 4, 'Y')
+            heel_bone.tail = heel_bone.head + \
+                rotation_matrix @ (heel_bone.tail - heel_bone.head)
+            if foot_bone_name in armature.data.edit_bones:
+                foot_bone = armature.data.edit_bones[foot_bone_name]
+                foot_head_y = foot_bone.head[1]
+                heel_bone.head[1] = foot_head_y
+                heel_bone.tail[1] = foot_head_y
+            heel_bone.parent = armature.data.edit_bones[foot_bone_name]
+
+    def transfer_and_remove_vertex_weights(self, weight_mappings, obj):
+        if obj is None or obj.type != 'MESH':
+            return
+        vgroups = obj.vertex_groups
+        bpy.ops.object.mode_set(mode='OBJECT')
+        for source_group_name, target_group_name in weight_mappings.items():
+            if source_group_name not in vgroups:
+                continue
+            source_group = vgroups[source_group_name]
+            if target_group_name not in vgroups:
+                target_group = vgroups.new(name=target_group_name)
+            else:
+                target_group = vgroups[target_group_name]
+            for vert in obj.data.vertices:
+                new_weight = 0.0
+                has_source_weight = False
+                for group in vert.groups:
+                    if group.group == source_group.index:
+                        new_weight += group.weight
+                        has_source_weight = True
+                        break
+                if has_source_weight:
+                    for group in vert.groups:
+                        if group.group == target_group.index:
+                            new_weight += group.weight
+                            break
+                    target_group.add([vert.index], new_weight, 'REPLACE')
+                    source_group.remove([vert.index])
+
+    def create_circle_widget(self, name, radius=0.1, location=(0, 0, 0)):
+        if name in bpy.data.objects:
+            return bpy.data.objects[name]
+        mesh = bpy.data.meshes.new(name + "_Mesh")
+        obj = bpy.data.objects.new(name, mesh)
+        bpy.context.collection.objects.link(obj)
+        bm = bmesh.new()
+        segments = 32
+        verts = []
+        for i in range(segments):
+            angle = 2 * pi * i / segments
+            x = cos(angle) * radius
+            y = sin(angle) * radius
+            verts.append(bm.verts.new((x, y, 0)))
+        for i in range(segments):
+            bm.edges.new((verts[i], verts[(i + 1) % segments]))
+        bm.to_mesh(mesh)
+        bm.free()
+        obj.location = location
+        obj.rotation_euler[0] = pi / 2
+        obj.name = name
+        return obj
+
+    def create_capsule_path(self, bm, radius=0.14, spacing=0.6):
+        segments = 16
+        left_x = -spacing / 2
+        right_x = spacing / 2
+        verts = []
+        for i in range(segments + 1):
+            angle = pi / 2 + pi * i / segments
+            x = left_x + cos(angle) * radius
+            y = sin(angle) * radius
+            verts.append(bm.verts.new((x, y, 0)))
+        for i in range(segments + 1):
+            angle = -pi / 2 + pi * i / segments
+            x = right_x + cos(angle) * radius
+            y = sin(angle) * radius
+            verts.append(bm.verts.new((x, y, 0)))
+        return verts
+
+    def create_double_capsule_widget(self, name, inner_radius=0.14, outer_radius=0.17, spacing=0.6):
+        if name in bpy.data.objects:
+            return bpy.data.objects[name]
+        mesh = bpy.data.meshes.new(name + "_Mesh")
+        obj = bpy.data.objects.new(name, mesh)
+        bpy.context.collection.objects.link(obj)
+        bm = bmesh.new()
+        verts_inner = self.create_capsule_path(bm, inner_radius, spacing)
+        for i in range(len(verts_inner)):
+            bm.edges.new(
+                (verts_inner[i], verts_inner[(i + 1) % len(verts_inner)]))
+        verts_outer = self.create_capsule_path(bm, outer_radius, spacing)
+        for i in range(len(verts_outer)):
+            bm.edges.new(
+                (verts_outer[i], verts_outer[(i + 1) % len(verts_outer)]))
+        bm.to_mesh(mesh)
+        bm.free()
+        obj.rotation_euler[0] = pi / 2
+        obj.name = name
+        return obj
+
+    def lock_bone_transformations(self, bone):
+        bone.lock_location[0] = False
+        bone.lock_location[1] = False
+        bone.lock_location[2] = False
+        bone.lock_rotation_w = False
+        bone.lock_rotation[0] = False
+        bone.lock_rotation[1] = False
+        bone.lock_rotation[2] = False
+        bone.lock_scale[0] = False
+        bone.lock_scale[1] = False
+        bone.lock_scale[2] = False
+
+    def select_and_move_bones(self, armature, keyword, collection_index):
+        bpy.ops.pose.select_all(action='DESELECT')
+        selected_bones = []
+        for bone in armature.pose.bones:
+            if keyword in bone.name:
+                selected_bones.append(bone)
+                bone.bone.select = True
+                self.lock_bone_transformations(bone)
+        if selected_bones:
+            bpy.ops.armature.move_to_collection(
+                collection_index=collection_index)
+        return len(selected_bones)
+
+    def execute(self, context):
+        logger.info("Starting Rigify process")
+
+        if not self.validate_scene_objects(context):
+            self.report(
+                {"ERROR"}, "Scene validation failed. Please check console for details.")
+            return {"CANCELLED"}
+
+        selected_object = context.active_object
+        if not selected_object:
+            logger.error("No active object selected")
+            self.report(
+                {"ERROR"}, "No active object selected. Please select a mesh or armature.")
+            return {"CANCELLED"}
+
+        logger.info(
+            f"Processing object: '{selected_object.name}' (Type: {selected_object.type})")
+
+        if self.check_if_already_rigged(selected_object):
+            self.report(
+                {"ERROR"}, "Selected object is already rigged or using a rigified armature. Please select an unrigged object.")
+            return {"CANCELLED"}
+
+        original_selected_object_type = selected_object.type
+        original_selected_object_name = selected_object.name
+
+        if selected_object.type == 'MESH':
+            logger.info(
+                "Processing mesh object - searching for associated armature")
+            for modifier in selected_object.modifiers:
+                if modifier.type == 'ARMATURE' and modifier.object:
+                    armature_obj = modifier.object
+                    if self.check_if_already_rigged(armature_obj):
+                        self.report(
+                            {"ERROR"}, f"Associated armature '{armature_obj.name}' is already rigged.")
+                        return {"CANCELLED"}
+
+                    if not self.validate_armature_structure(armature_obj):
+                        self.report(
+                            {"ERROR"}, f"Armature '{armature_obj.name}' structure validation failed.")
+                        return {"CANCELLED"}
+
+                    if armature_obj.hide_get():
+                        armature_obj.hide_set(False)
+                    context.view_layer.objects.active = armature_obj
+                    selected_object = armature_obj
+                    logger.info(
+                        f"Found and switched to armature: '{armature_obj.name}'")
+                    break
+        elif selected_object.type == 'ARMATURE':
+            if not self.validate_armature_structure(selected_object):
+                self.report(
+                    {"ERROR"}, f"Armature '{selected_object.name}' structure validation failed.")
+                return {"CANCELLED"}
+        else:
+            logger.info(
+                "Object is not mesh or armature - searching for armature in scene")
+            for obj in context.scene.objects:
+                if obj.type == 'ARMATURE':
+                    if self.check_if_already_rigged(obj):
+                        continue
+                    if not self.validate_armature_structure(obj):
+                        continue
+                    if obj.hide_get():
+                        obj.hide_set(False)
+                    context.view_layer.objects.active = obj
+                    selected_object = obj
+                    logger.info(f"Found suitable armature: '{obj.name}'")
+                    break
+
+        if selected_object.type != 'ARMATURE':
+            logger.error("No suitable armature found for rigify process")
+            self.report(
+                {"ERROR"}, "No suitable armature found. Please ensure scene contains an unrigged armature with proper bone structure.")
+            return {"CANCELLED"}
+
+        OrigArmature = selected_object.name
+        RigArmature = "RIG-" + OrigArmature
+
+        if RigArmature in bpy.data.objects:
+            logger.error(f"Rigified armature '{RigArmature}' already exists")
+            self.report(
+                {"ERROR"}, f"This armature has already been rigified as '{RigArmature}'. Please use the existing rig.")
+            return {"CANCELLED"}
+
+        if selected_object.get('rigify_generated') == True:
+            logger.error(
+                f"Armature '{selected_object.name}' is already Rigify-generated")
+            self.report(
+                {"ERROR"}, "This armature is already rigged with Rigify. Please use a different armature.")
+            return {"CANCELLED"}
+
+        logger.info("Searching for associated character mesh")
+        CharacterMesh = None
+        for obj in context.scene.objects:
+            if obj.type == 'MESH':
+                for modifier in obj.modifiers:
+                    if modifier.type == 'ARMATURE' and modifier.object and modifier.object.name == OrigArmature:
+                        if not self.validate_mesh_vertex_groups(obj):
+                            logger.warning(
+                                f"Mesh '{obj.name}' vertex groups validation failed")
+                        CharacterMesh = obj
+                        logger.info(f"Found character mesh: '{obj.name}'")
+                        break
+                if CharacterMesh:
+                    break
+
+        if not CharacterMesh:
+            logger.error("No mesh found associated with the armature")
+            self.report(
+                {"ERROR"}, "No mesh found associated with the armature. Please ensure a mesh with armature modifier is present.")
+            return {"CANCELLED"}
+
+        logger.info("Preparing armature for rigify process")
+        if selected_object.hide_viewport:
+            selected_object.hide_viewport = False
+        if selected_object.hide_get():
+            selected_object.hide_set(False)
+
+        original_location = selected_object.location.copy()
+        original_rotation = selected_object.rotation_euler.copy()
+        original_scale = selected_object.scale.copy()
+
+        selected_object.location = (0, 0, 0)
+        selected_object.rotation_euler = (0, 0, 0)
+        selected_object.scale = (1, 1, 1)
+
+        logger.info("Starting bone alignment adjustments")
+        bpy.ops.object.mode_set(mode='EDIT')
+        edit_bones = selected_object.data.edit_bones
+        finger13_exists_left = "Bip001LFinger13" in edit_bones
+        finger13_exists_right = "Bip001RFinger13" in edit_bones
+
+        alignment_iterations = 0
+        while self.check_alignment(edit_bones, finger13_exists_left, finger13_exists_right):
+            self.apply_adjustment(
+                edit_bones, finger13_exists_left, finger13_exists_right)
+            alignment_iterations += 1
+            if alignment_iterations > self.MAX_ITER:
+                logger.warning(
+                    f"Bone alignment reached maximum iterations ({self.MAX_ITER})")
+                break
+
+        if alignment_iterations > 0:
+            logger.info(
+                f"Completed bone alignment adjustments in {alignment_iterations} iterations")
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.transform_apply(scale=True)
+
+        logger.info("Processing spine bone adjustments")
+        rig_armature_object = context.view_layer.objects.active
+        if rig_armature_object and rig_armature_object.type == 'ARMATURE':
+            bpy.ops.object.mode_set(mode='EDIT')
+            spine_bone = rig_armature_object.data.edit_bones.get(
+                "Bip001Spine2")
+            if spine_bone:
+                bone_length = (spine_bone.tail - spine_bone.head).length
+                if bone_length < 0.06:
+                    direction = spine_bone.tail - spine_bone.head
+                    direction.normalize()
+                    spine_bone.tail = spine_bone.head + direction * 0.15
+                    spine_bone.tail.y = spine_bone.head.y
+                    spine_bone.head.z += 0.03
+                    spine_bone.tail.z += 0.03
+                    logger.info("Applied spine bone length adjustments")
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        logger.info("Setting up bone collections and connections")
+        armature = context.object
+        self.remove_bone_collections(armature)
+        bpy.ops.object.mode_set(mode='EDIT')
+
         bone_pairs = [
             ('Bip001Spine1', 'Bip001Spine2'),
             ('Bip001Pelvis', 'Bip001Spine'),
@@ -1647,13 +2014,8 @@ class WW_OT_Rigify(Operator):
             ('Bip001RCalf', 'Bip001RFoot'),
             ('Bip001RFoot', 'Bip001RToe0'),
         ]
-        for bone1_name, bone2_name in bone_pairs:
-            if bone1_name in armature.data.edit_bones and bone2_name in armature.data.edit_bones:
-                bone1 = armature.data.edit_bones[bone1_name]
-                bone2 = armature.data.edit_bones[bone2_name]
-                bone1.tail = bone2.head
+        self.adjust_bone_positions(armature, bone_pairs)
 
-        logger.info("Fixing twist bone parents")
         twist_bones = {
             'Bip001RForeTwist': 'Bip001RForearm',
             'Bip001LForeTwist': 'Bip001LForearm'
@@ -1662,11 +2024,8 @@ class WW_OT_Rigify(Operator):
             if twist_bone in armature.data.edit_bones and correct_parent in armature.data.edit_bones:
                 bone = armature.data.edit_bones[twist_bone]
                 if bone.parent != armature.data.edit_bones[correct_parent]:
-                    logger.info(
-                        f"Correcting parent of {twist_bone} to {correct_parent}")
                     bone.parent = armature.data.edit_bones[correct_parent]
 
-        logger.info("Setting bone connections")
         spine_bones = [
             'Bip001Spine', 'Bip001Spine1', 'Bip001Spine2',
             'Bip001LForearm', 'Bip001LHand', 'Bip001LFinger01',
@@ -1683,25 +2042,19 @@ class WW_OT_Rigify(Operator):
             'Bip001LFinger13', 'Bip001LFinger23', 'Bip001LFinger33', 'Bip001LFinger43',
             'Bip001RFinger13', 'Bip001RFinger23', 'Bip001RFinger33', 'Bip001RFinger43',
         ]
-        connected_count = 0
-        for bone_name in spine_bones:
-            if bone_name in armature.data.edit_bones:
-                armature.data.edit_bones[bone_name].use_connect = True
-                connected_count += 1
-        logger.info(f"Connected {connected_count} bones")
+        self.set_bone_connect(armature, spine_bones)
 
-        logger.info("Adjusting bone rolls")
         bones_to_adjust_roll = [
             'Bip001Pelvis', 'Bip001Spine', 'Bip001Spine1',
             'Bip001Spine2', 'Bip001LClavicle', 'Bip001RClavicle'
         ]
-        for bone_name in bones_to_adjust_roll:
-            if bone_name in armature.data.edit_bones:
-                armature.data.edit_bones[bone_name].roll = 0
-        bpy.ops.object.mode_set(mode='OBJECT')
+        self.adjust_bone_roll(armature, bones_to_adjust_roll)
 
-        logger.info("Creating bone collections")
+        logger.info(
+            "Creating bone collections and setting up Rigify parameters")
+        bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.mode_set(mode='POSE')
+
         bone_data = [
             ('Torso', 0, 1),
             ('Torso (Tweak)', 1, 2),
@@ -1721,25 +2074,20 @@ class WW_OT_Rigify(Operator):
             ('Leg.R (Tweak)', 15, 10),
             ('Root', 16, 11),
         ]
-        for collection_name, index, row in bone_data:
-            bpy.ops.armature.collection_add()
-            new_collection = armature.data.collections[-1]
-            new_collection.name = collection_name
-            bpy.ops.armature.rigify_collection_set_ui_row(index=index, row=row)
+        self.process_bone_collections_and_rigify(armature, bone_data)
 
-        logger.info("Adding additional bone collections")
         collections_to_add = ['Hair', 'Cloth', 'Skirt', 'Others']
         for collection_name in collections_to_add:
             bpy.ops.armature.collection_add()
             new_collection = armature.data.collections[-1]
             new_collection.name = collection_name
+
         bpy.ops.armature.rigify_collection_add_ui_row(row=3, add=True)
         bpy.ops.armature.rigify_collection_add_ui_row(row=6, add=True)
         bpy.ops.armature.rigify_collection_add_ui_row(row=10, add=True)
         bpy.ops.armature.rigify_collection_add_ui_row(row=13, add=True)
         bpy.ops.armature.rigify_collection_add_ui_row(row=15, add=True)
 
-        logger.info("Assigning rigify types to bones")
         bones_and_rig_types = [
             ('Bip001Pelvis', 'spines.basic_spine', None),
             ('Bip001LClavicle', 'basic.super_copy', 'shoulder'),
@@ -1754,7 +2102,6 @@ class WW_OT_Rigify(Operator):
             ('Bip001Head', 'basic.super_copy', 'circle'),
         ]
         if 'Bip001LFinger13' in armature.pose.bones:
-            logger.info("Adding 3-part finger bone structure rigify types")
             bones_and_rig_types.extend([
                 ('Bip001LFinger11', 'limbs.super_finger', None),
                 ('Bip001LFinger21', 'limbs.super_finger', None),
@@ -1765,8 +2112,8 @@ class WW_OT_Rigify(Operator):
                 ('Bip001RFinger31', 'limbs.super_finger', None),
                 ('Bip001RFinger41', 'limbs.super_finger', None),
             ])
+            logger.info("Applied finger13 bone configuration")
         else:
-            logger.info("Adding 2-part finger bone structure rigify types")
             bones_and_rig_types.extend([
                 ('Bip001LFinger1', 'limbs.super_finger', None),
                 ('Bip001LFinger2', 'limbs.super_finger', None),
@@ -1777,87 +2124,48 @@ class WW_OT_Rigify(Operator):
                 ('Bip001RFinger3', 'limbs.super_finger', None),
                 ('Bip001RFinger4', 'limbs.super_finger', None),
             ])
+            logger.info("Applied standard finger bone configuration")
+        self.modify_bone_rig_type(armature, bones_and_rig_types)
 
-        assigned_count = 0
-        for bone_name, rig_type, widget_type in bones_and_rig_types:
-            bone = armature.pose.bones.get(bone_name)
-            if bone:
-                armature.data.bones[bone_name].select = True
-                armature.data.bones.active = armature.data.bones[bone_name]
-                bone.rigify_type = rig_type
-                if widget_type and bone.rigify_parameters:
-                    bone.rigify_parameters.super_copy_widget_type = widget_type
-                assigned_count += 1
-        logger.info(f"Assigned rigify types to {assigned_count} bones")
-
-        logger.info("Creating heel bones")
+        logger.info("Creating heel bones and preparing for Rigify generation")
         bpy.ops.object.mode_set(mode='EDIT')
-
-        def duplicate_and_adjust_heel_bone(foot_bone_name, toe_bone_name, heel_bone_name, rotation_angle=1.5708):
-            if toe_bone_name in armature.data.edit_bones:
-                toe_bone = armature.data.edit_bones[toe_bone_name]
-                heel_bone = armature.data.edit_bones.new(name=heel_bone_name)
-                heel_bone.head = toe_bone.head
-                heel_bone.tail = toe_bone.tail
-                heel_bone.roll = toe_bone.roll
-                rotation_matrix = mathutils.Matrix.Rotation(
-                    rotation_angle, 4, 'Y')
-                heel_bone.tail = heel_bone.head + \
-                    rotation_matrix @ (heel_bone.tail - heel_bone.head)
-                if foot_bone_name in armature.data.edit_bones:
-                    foot_bone = armature.data.edit_bones[foot_bone_name]
-                    foot_head_y = foot_bone.head[1]
-                    heel_bone.head[1] = foot_head_y
-                    heel_bone.tail[1] = foot_head_y
-                heel_bone.parent = armature.data.edit_bones[foot_bone_name]
-                logger.info(f"Created heel bone: {heel_bone_name}")
-                return True
-            return False
-
-        heel_created_left = duplicate_and_adjust_heel_bone(
-            'Bip001LFoot', 'Bip001LToe0', 'Bip001LHeel0', rotation_angle=1.5708)
-        heel_created_right = duplicate_and_adjust_heel_bone(
-            'Bip001RFoot', 'Bip001RToe0', 'Bip001RHeel0', rotation_angle=-1.5708)
-        logger.info(
-            f"Heel bones created: Left = {heel_created_left}, Right = {heel_created_right}")
+        self.duplicate_and_adjust_heel_bone(
+            armature, 'Bip001LFoot', 'Bip001LToe0', 'Bip001LHeel0', rotation_angle=1.5708)
+        self.duplicate_and_adjust_heel_bone(
+            armature, 'Bip001RFoot', 'Bip001RToe0', 'Bip001RHeel0', rotation_angle=-1.5708)
 
         bpy.ops.object.mode_set(mode='OBJECT')
+        if context.object and context.object.type == 'ARMATURE':
+            armature = context.object
+            bpy.ops.object.mode_set(mode='EDIT')
+            for bone in armature.data.edit_bones:
+                if bone.name.startswith("Bip001R") and not bone.name.endswith(".R"):
+                    bone.name += ".R"
+                elif bone.name.startswith("Bip001L") and not bone.name.endswith(".L"):
+                    bone.name += ".L"
+            for bone in armature.data.edit_bones:
+                if bone.name.startswith("Bip001R"):
+                    bone.name = bone.name.replace("Bip001R", "Bip001", 1)
+                elif bone.name.startswith("Bip001L"):
+                    bone.name = bone.name.replace("Bip001L", "Bip001", 1)
 
-        logger.info("Renaming bones with left/right side suffixes")
-        bpy.ops.object.mode_set(mode='EDIT')
-        renamed_count = 0
-        for bone in armature.data.edit_bones:
-            if bone.name.startswith("Bip001R") and not bone.name.endswith(".R"):
-                old_name = bone.name
-                bone.name += ".R"
-                renamed_count += 1
-                logger.debug(f"Renamed {old_name} to {bone.name}")
-            elif bone.name.startswith("Bip001L") and not bone.name.endswith(".L"):
-                old_name = bone.name
-                bone.name += ".L"
-                renamed_count += 1
-                logger.debug(f"Renamed {old_name} to {bone.name}")
-        logger.info(f"Renamed {renamed_count} bones with side suffixes")
+        logger.info("Generating Rigify armature")
+        try:
+            bpy.ops.pose.rigify_generate()
+            logger.info("Rigify generation completed successfully")
+        except Exception as e:
+            logger.error(f"Rigify generation failed: {str(e)}")
+            self.report({"ERROR"}, f"Rigify generation failed: {str(e)}")
+            return {"CANCELLED"}
 
-        logger.info("Normalizing bone naming")
-        side_prefix_count = 0
-        for bone in armature.data.edit_bones:
-            if bone.name.startswith("Bip001R"):
-                old_name = bone.name
-                bone.name = bone.name.replace("Bip001R", "Bip001", 1)
-                side_prefix_count += 1
-                logger.debug(f"Normalized {old_name} to {bone.name}")
-            elif bone.name.startswith("Bip001L"):
-                old_name = bone.name
-                bone.name = bone.name.replace("Bip001L", "Bip001", 1)
-                side_prefix_count += 1
-                logger.debug(f"Normalized {old_name} to {bone.name}")
-        logger.info(f"Normalized {side_prefix_count} bone names")
+        rig_obj = context.scene.objects.get(RigArmature)
+        if rig_obj:
+            rig_obj.location = original_location
+            rig_obj.rotation_euler = original_rotation
+            rig_obj.scale = original_scale
+            logger.info(f"Applied original transforms to rig '{RigArmature}'")
 
-        logger.info("Generating Rigify rig")
-        bpy.ops.pose.rigify_generate()
-
-        logger.info("Adjusting neck and head bone controllers")
+        logger.info("Configuring bone properties and custom shapes")
         bpy.ops.object.mode_set(mode='POSE')
         armature = context.object
         pose_bone_neck = armature.pose.bones.get("Bip001Neck")
@@ -1867,11 +2175,9 @@ class WW_OT_Rigify(Operator):
             if edit_bone_neck:
                 neck_length = (edit_bone_neck.tail -
                                edit_bone_neck.head).length / 2
-                logger.info(f"Neck length: {neck_length:.4f}")
             bpy.ops.object.mode_set(mode='POSE')
             pose_bone_neck.custom_shape_translation.y = neck_length
             pose_bone_neck.custom_shape_scale_xyz = (1.5, 1.5, 1.5)
-            logger.info("Adjusted neck bone controller shape and position")
 
         pose_bone_head = armature.pose.bones.get("Bip001Head")
         if pose_bone_head:
@@ -1880,245 +2186,33 @@ class WW_OT_Rigify(Operator):
             if edit_bone_head:
                 head_length = (edit_bone_head.tail -
                                edit_bone_head.head).length
-                logger.info(f"Head length: {head_length:.4f}")
             bpy.ops.object.mode_set(mode='POSE')
             pose_bone_head.custom_shape_translation.y = head_length * 1.2
             pose_bone_head.custom_shape_scale_xyz = (2, 2, 2)
-            logger.info("Adjusted head bone controller shape and position")
 
-        logger.info("Disabling IK Stretch on limbs")
         bpy.ops.object.mode_set(mode='OBJECT')
         context.object.pose.bones["Bip001UpperArm_parent.L"]["IK_Stretch"] = 0.000
         context.object.pose.bones["Bip001UpperArm_parent.R"]["IK_Stretch"] = 0.000
         context.object.pose.bones["Bip001Thigh_parent.L"]["IK_Stretch"] = 0.000
         context.object.pose.bones["Bip001Thigh_parent.R"]["IK_Stretch"] = 0.000
 
-        logger.info("Setting up bone collections")
-        bpy.ops.object.mode_set(mode='POSE')
-        armature = context.view_layer.objects.active
-        bones_to_move = {
-            0: ["torso", "chest", "Bip001Clavicle.L", "Bip001Clavicle.R", "hips", "Bip001Neck", "Bip001Head", "EyeTracker"],
-            1: ["Bip001Spine_fk", "Bip001Spine1_fk", "Bip001Spine2_fk", "tweak_Bip001Spine1",
-                "tweak_Bip001Spine2", "tweak_Bip001Spine2.001", "tweak_Bip001Spine", "tweak_Bip001Pelvis", "Bip001Pelvis_fk", "tweak_Bip001Neck"],
-            2: ["Bip001Finger0_master.L", "Bip001Finger1_master.L", "Bip001Finger2_master.L", "Bip001Finger3_master.L", "Bip001Finger4_master.L",
-                "Bip001Finger0_master.R", "Bip001Finger1_master.R", "Bip001Finger2_master.R", "Bip001Finger3_master.R", "Bip001Finger4_master.R",
-                "Bip001Finger11_master.L", "Bip001Finger21_master.L", "Bip001Finger21_master.L", "Bip001Finger31_master.L", "Bip001Finger41_master.L",
-                "Bip001Finger11_master.R", "Bip001Finger21_master.R", "Bip001Finger21_master.R", "Bip001Finger31_master.R", "Bip001Finger41_master.R"],
-            3: ["Bip001Finger01.L", "Bip001Finger02.L", "Bip001Finger0.L.001", "Bip001Finger1.L", "Bip001Finger11.L", "Bip001Finger12.L", "Bip001Finger1.L.001",
-                "Bip001Finger2.L", "Bip001Finger21.L", "Bip001Finger22.L", "Bip001Finger2.L.001", "Bip001Finger3.L", "Bip001Finger31.L", "Bip001Finger32.L", "Bip001Finger3.L.001",
-                "Bip001Finger4.L", "Bip001Finger41.L", "Bip001Finger42.L", "Bip001Finger4.L.001", "Bip001Finger0.L",
-                "Bip001Finger01.R", "Bip001Finger02.R", "Bip001Finger0.R.001", "Bip001Finger1.R", "Bip001Finger11.R", "Bip001Finger12.R", "Bip001Finger1.R.001",
-                "Bip001Finger2.R", "Bip001Finger21.R", "Bip001Finger22.R", "Bip001Finger2.R.001", "Bip001Finger3.R", "Bip001Finger31.R", "Bip001Finger32.R", "Bip001Finger3.R.001",
-                "Bip001Finger4.R", "Bip001Finger41.R", "Bip001Finger42.R", "Bip001Finger4.R.001", "Bip001Finger0.R",
-                "Bip001Finger13.L", "Bip001Finger11.L.001", "Bip001Finger23.L", "Bip001Finger21.L.001", "Bip001Finger33.L", "Bip001Finger31.L.001", "Bip001Finger43.L", "Bip001Finger41.L.001",
-                "Bip001Finger13.R", "Bip001Finger11.R.001", "Bip001Finger23.R", "Bip001Finger21.R.001", "Bip001Finger33.R", "Bip001Finger31.R.001", "Bip001Finger43.R", "Bip001Finger41.R.001"],
-            4: ["Bip001UpperArm_parent.L", "Bip001UpperArm_ik.L", "Bip001Hand_ik.L"],
-            5: ["Bip001UpperArm_parent.R", "Bip001UpperArm_ik.R", "Bip001Hand_ik.R"],
-            6: ["Bip001UpperArm_fk.L", "Bip001Forearm_fk.L", "Bip001Hand_fk.L"],
-            7: ["Bip001UpperArm_fk.R", "Bip001Forearm_fk.R", "Bip001Hand_fk.R"],
-            8: ["Bip001UpperArm_tweak.L", "Bip001UpperArm_tweak.L.001", "Bip001Forearm_tweak.L", "Bip001Forearm_tweak.L.001", "Bip001Hand_tweak.L"],
-            9: ["Bip001UpperArm_tweak.R", "Bip001UpperArm_tweak.R.001", "Bip001Forearm_tweak.R", "Bip001Forearm_tweak.R.001", "Bip001Hand_tweak.R"],
-            10: ["Bip001Thigh_parent.L", "Bip001Thigh_ik.L", "Bip001Foot_heel_ik.L", "Bip001Foot_spin_ik.L", "Bip001Toe0.L", "Bip001Foot_ik.L"],
-            11: ["Bip001Thigh_parent.R", "Bip001Thigh_ik.R", "Bip001Foot_heel_ik.R", "Bip001Foot_spin_ik.R", "Bip001Toe0.R", "Bip001Foot_ik.R"],
-            12: ["Bip001Thigh_fk.L", "Bip001Calf_fk.L", "Bip001Foot_fk.L"],
-            13: ["Bip001Thigh_fk.R", "Bip001Calf_fk.R", "Bip001Foot_fk.R"],
-            14: ["Bip001Thigh_tweak.L", "Bip001Thigh_tweak.L.001", "Bip001Calf_tweak.L", "Bip001Calf_tweak.L.001", "Bip001Foot_tweak.L"],
-            15: ["Bip001Thigh_tweak.R", "Bip001Thigh_tweak.R.001", "Bip001Calf_tweak.R", "Bip001Calf_tweak.R.001", "Bip001Foot_tweak.R"],
-        }
-        theme_for_groups = {
-            0: 'THEME09',
-            1: 'THEME04',
-            2: 'THEME14',
-            3: 'THEME03',
-            4: 'THEME01',
-            5: 'THEME01',
-            6: 'THEME03',
-            7: 'THEME03',
-            8: 'THEME04',
-            9: 'THEME04',
-            10: 'THEME01',
-            11: 'THEME01',
-            12: 'THEME03',
-            13: 'THEME03',
-            14: 'THEME04',
-            15: 'THEME04',
-        }
-
-        logger.info("Setting bone colors")
-        for group_index, bone_names in bones_to_move.items():
-            theme = theme_for_groups.get(group_index)
-            bones_colored = 0
-            for bone_name in bone_names:
-                bone = armature.pose.bones.get(bone_name)
-                if bone and theme:
-                    bone.color.palette = theme
-                    bones_colored += 1
-            logger.debug(
-                f"Colored {bones_colored} bones in group {group_index} with theme {theme}")
-
-        logger.info("Organizing bones into collections")
-        for collection_index, bone_names in bones_to_move.items():
-            bpy.ops.pose.select_all(action='DESELECT')
-            bones_moved = 0
-            for bone_name in bone_names:
-                bone = armature.pose.bones.get(bone_name)
-                if bone:
-                    bone.bone.select = True
-                    bones_moved += 1
-            logger.debug(
-                f"Moving {bones_moved} bones to collection {collection_index}")
-            bpy.ops.armature.move_to_collection(
-                collection_index=collection_index)
-
-        logger.info("Setting collection visibility")
-        bpy.context.object.data.collections_all["ORG"].is_visible = True
-
-        logger.info("Configuring bone transformations")
-        bpy.ops.object.mode_set(mode='POSE')
-        armature = context.view_layer.objects.active
-
-        def lock_bone_transformations(bone):
-            bone.lock_location[0] = False
-            bone.lock_location[1] = False
-            bone.lock_location[2] = False
-            bone.lock_rotation_w = False
-            bone.lock_rotation[0] = False
-            bone.lock_rotation[1] = False
-            bone.lock_rotation[2] = False
-            bone.lock_scale[0] = False
-            bone.lock_scale[1] = False
-            bone.lock_scale[2] = False
-
-        logger.info("Organizing special bone categories")
-
-        def select_and_move_bones(keyword, collection_index):
-            bpy.ops.pose.select_all(action='DESELECT')
-            selected_bones = []
-            for bone in armature.pose.bones:
-                if keyword in bone.name:
-                    selected_bones.append(bone)
-                    bone.bone.select = True
-                    lock_bone_transformations(bone)
-            logger.debug(
-                f"Found {len(selected_bones)} bones with keyword '{keyword}' for collection {collection_index}")
-            bpy.ops.armature.move_to_collection(
-                collection_index=collection_index)
-            return len(selected_bones)
-
-        keywords_and_collections = [
-            ("Hair", 17),
-            ("Earrings", 17),
-            ("Piao", 18),
-            ("Skirt", 19),
-            ("Trousers", 19),
-            ("Other", 20),
-            ("Weapon", 20),
-            ("Prop", 20),
-            ("Chibang", 20),
-            ("EyeTracker", 0),
-            ("Bip001Neck.001", 21),
-            ("Bip001Head.001", 21),
-            ("Chest", 0),
-        ]
-
-        for keyword, collection_index in keywords_and_collections:
-            count = select_and_move_bones(keyword, collection_index)
-            logger.info(
-                f"Moved {count} bones with keyword '{keyword}' to collection {collection_index}")
-
-        logger.info("Configuring collection visibility settings")
-        bpy.context.object.data.collections_all["ORG"].is_visible = False
-        bpy.context.object.data.collections_all["Torso (Tweak)"].is_visible = False
-        bpy.context.object.data.collections_all["Arm.L (FK)"].is_visible = False
-        bpy.context.object.data.collections_all["Arm.R (FK)"].is_visible = False
-        bpy.context.object.data.collections_all["Leg.L (FK)"].is_visible = False
-        bpy.context.object.data.collections_all["Leg.R (FK)"].is_visible = False
-        bpy.context.object.data.collections_all["Hair"].is_visible = False
-        bpy.context.object.data.collections_all["Cloth"].is_visible = False
-        bpy.context.object.data.collections_all["Skirt"].is_visible = False
-        bpy.context.object.data.collections_all["Arm.L (Tweak)"].is_visible = False
-        bpy.context.object.data.collections_all["Arm.R (Tweak)"].is_visible = False
-        bpy.context.object.data.collections_all["Leg.L (Tweak)"].is_visible = False
-        bpy.context.object.data.collections_all["Leg.R (Tweak)"].is_visible = False
-
-        logger.info("Setting ORG bones to deform")
         obj = context.active_object
         if obj and obj.type == 'ARMATURE':
             bpy.ops.object.mode_set(mode='EDIT')
-            deform_count = 0
             for bone in obj.data.edit_bones:
                 if bone.name.startswith('ORG-'):
                     bone.use_deform = True
-                    deform_count += 1
-            logger.info(f"Set {deform_count} ORG bones to deform")
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        logger.info("Updating mesh vertex groups for rig compatibility")
+        logger.info("Updating vertex groups and weight mappings")
         bpy.ops.object.select_all(action='DESELECT')
         context.view_layer.objects.active = CharacterMesh
         CharacterMesh.select_set(True)
-
-        group_rename_count = 0
         for obj in context.selected_objects:
             if obj.type == 'MESH':
                 for group in obj.vertex_groups:
                     new_name = "ORG-" + group.name
                     group.name = new_name
-                    group_rename_count += 1
-        logger.info(
-            f"Renamed {group_rename_count} vertex groups with ORG- prefix")
-
-        logger.info("Transferring and remapping vertex weights")
-
-        def transfer_and_remove_vertex_weights(weight_mappings):
-            obj = context.object
-            if obj is None or obj.type != 'MESH':
-                logger.warning("No mesh object selected for weight transfer")
-                return
-
-            vgroups = obj.vertex_groups
-            bpy.ops.object.mode_set(mode='OBJECT')
-            transfers_completed = 0
-
-            for source_group_name, target_group_name in weight_mappings.items():
-                if source_group_name not in vgroups:
-                    logger.debug(
-                        f"Source group {source_group_name} not found, skipping")
-                    continue
-
-                source_group = vgroups[source_group_name]
-                if target_group_name not in vgroups:
-                    logger.debug(
-                        f"Creating new target group {target_group_name}")
-                    target_group = vgroups.new(name=target_group_name)
-                else:
-                    target_group = vgroups[target_group_name]
-
-                verts_affected = 0
-                for vert in obj.data.vertices:
-                    new_weight = 0.0
-                    has_source_weight = False
-
-                    for group in vert.groups:
-                        if group.group == source_group.index:
-                            new_weight += group.weight
-                            has_source_weight = True
-                            break
-
-                    if has_source_weight:
-                        for group in vert.groups:
-                            if group.group == target_group.index:
-                                new_weight += group.weight
-                                break
-                        target_group.add([vert.index], new_weight, 'REPLACE')
-                        source_group.remove([vert.index])
-                        verts_affected += 1
-
-                transfers_completed += 1
-                logger.debug(
-                    f"Transferred weights from {source_group_name} to {target_group_name}, affected {verts_affected} vertices")
-
-            logger.info(f"Completed {transfers_completed} weight transfers")
 
         weight_mappings = {
             "ORG-Bip001UpArmTwist.L": "DEF-Bip001UpperArm.L",
@@ -2154,78 +2248,201 @@ class WW_OT_Rigify(Operator):
             "ORG-Bip001ThighTwist1.R": "DEF-Bip001Thigh.R",
             "ORG-Bip001_R_CalfTwist": "DEF-Bip001Calf.R.001",
         }
+        self.transfer_and_remove_vertex_weights(weight_mappings, CharacterMesh)
 
-        transfer_and_remove_vertex_weights(weight_mappings)
-
-        logger.info("Updating armature modifier")
         bpy.ops.object.select_all(action='DESELECT')
         context.view_layer.objects.active = CharacterMesh
         CharacterMesh.select_set(True)
         modifier_found = False
         for modifier in CharacterMesh.modifiers:
             if modifier.type == 'ARMATURE' and modifier.object and modifier.object.name == OrigArmature:
-                rig_armature_object = context.scene.objects.get(
-                    RigArmatureName)
+                rig_armature_object = context.scene.objects.get(RigArmature)
                 if rig_armature_object:
-                    logger.info(
-                        f"Updating armature modifier to use {RigArmatureName}")
                     modifier.object = rig_armature_object
                     modifier_found = True
+                    logger.info(
+                        f"Updated armature modifier to use '{RigArmature}'")
                     break
 
         if not modifier_found:
-            logger.warning(f"No armature modifier found for {OrigArmature}")
+            logger.warning("Could not find armature modifier to update")
 
-        logger.info("Creating eye tracker bone")
         bpy.ops.object.select_all(action='DESELECT')
-        rig_armature_object = context.scene.objects.get(RigArmatureName)
+        context.view_layer.objects.active = CharacterMesh
+        CharacterMesh.select_set(True)
+        mesh_obj = context.active_object
+        if mesh_obj and mesh_obj.type == 'MESH':
+            armature_mod = next(
+                (mod for mod in mesh_obj.modifiers if mod.type == 'ARMATURE'), None)
+            if armature_mod and armature_mod.object:
+                armature_obj = armature_mod.object
+                mesh_obj.parent = armature_obj
+                logger.info("Set mesh parent to rig armature")
+
+        logger.info("Setting up eye tracking system")
+        context.view_layer.objects.active = CharacterMesh
+        CharacterMesh.select_set(True)
+        obj = context.object
+        source_shape_keys = ["Pupil_R", "Pupil_L", "Pupil_Up", "Pupil_Down"]
+        target_material_name = None
+        for slot in obj.material_slots:
+            if "Eye" in slot.name:
+                target_material_name = slot.name
+                break
+        offset_connected = Vector((0.0, -0.001, 0.0))
+        offset_unconnected = Vector((0.0, 0.001, 0.0))
+        NEIGHBOR_DEPTH = 4
+        if obj and obj.type == 'MESH' and obj.data.shape_keys:
+            keys = obj.data.shape_keys.key_blocks
+            basis = obj.data.shape_keys.reference_key
+            bpy.ops.object.mode_set(mode='OBJECT')
+            mat_slots = obj.material_slots
+            relevant_face_vert_indices = set()
+            relevant_edges = set()
+            for poly in obj.data.polygons:
+                if poly.material_index < len(mat_slots) and mat_slots[poly.material_index].name == target_material_name:
+                    relevant_face_vert_indices.update(poly.vertices)
+                    relevant_edges.update(tuple(sorted((poly.vertices[i], poly.vertices[j])))
+                                          for i in range(len(poly.vertices)) for j in range(i + 1, len(poly.vertices)))
+            if relevant_face_vert_indices:
+                connectivity = defaultdict(set)
+                edge_faces = defaultdict(int)
+                for poly in obj.data.polygons:
+                    if poly.material_index < len(mat_slots) and mat_slots[poly.material_index].name == target_material_name:
+                        verts = poly.vertices
+                        for i in range(len(verts)):
+                            for j in range(i + 1, len(verts)):
+                                vi, vj = verts[i], verts[j]
+                                edge = tuple(sorted((vi, vj)))
+                                if vi in relevant_face_vert_indices and vj in relevant_face_vert_indices:
+                                    connectivity[vi].add(vj)
+                                    connectivity[vj].add(vi)
+                                    edge_faces[edge] += 1
+                seed_vertices = {
+                    v for v, linked in connectivity.items() if len(linked) > 10}
+                connected_vertices = set()
+                visited = set()
+                for seed in seed_vertices:
+                    queue = deque()
+                    queue.append((seed, 0))
+                    visited.add(seed)
+                    connected_vertices.add(seed)
+                    while queue:
+                        current, depth = queue.popleft()
+                        if depth >= NEIGHBOR_DEPTH:
+                            continue
+                        for neighbor in connectivity[current]:
+                            if neighbor not in visited:
+                                visited.add(neighbor)
+                                connected_vertices.add(neighbor)
+                                queue.append((neighbor, depth + 1))
+                unconnected_vertices = relevant_face_vert_indices - connected_vertices
+                border_vertices = set()
+                for edge, count in edge_faces.items():
+                    if count == 1:
+                        border_vertices.update(edge)
+                movable_unconnected = unconnected_vertices - border_vertices
+                for source_name in source_shape_keys:
+                    if source_name not in keys:
+                        continue
+                    source_key = keys[source_name]
+                    index = next(i for i, k in enumerate(keys)
+                                 if k.name == source_key.name)
+                    obj.active_shape_key_index = index
+                    bpy.ops.object.shape_key_add(from_mix=False)
+                    key_L = obj.data.shape_keys.key_blocks[-1]
+                    key_L.name = f"{source_name}.L"
+                    bpy.ops.object.shape_key_add(from_mix=False)
+                    key_R = obj.data.shape_keys.key_blocks[-1]
+                    key_R.name = f"{source_name}.R"
+                    for i in relevant_face_vert_indices:
+                        base_co = basis.data[i].co
+                        source_co = source_key.data[i].co
+                        delta = source_co - base_co
+                        if i in connected_vertices:
+                            offset = offset_connected
+                        elif i in movable_unconnected:
+                            offset = offset_unconnected
+                        else:
+                            offset = Vector((0.0, 0.0, 0.0))
+                        if base_co.x >= 0:
+                            key_L.data[i].co = base_co + delta * 2 + offset
+                        else:
+                            key_R.data[i].co = base_co + delta * 2 + offset
+                logger.info("Created eye shape keys")
+                bpy.ops.object.select_all(action='DESELECT')
+
+        rig_armature_object = context.scene.objects.get(RigArmature)
         if rig_armature_object:
             bpy.ops.object.select_all(action='DESELECT')
             context.view_layer.objects.active = rig_armature_object
             rig_armature_object.select_set(True)
+            eye_tracker_location = rig_armature_object.location.copy()
+            eye_tracker_rotation = rig_armature_object.rotation_euler.copy()
+            eye_tracker_scale = rig_armature_object.scale.copy()
+            rig_armature_object.location = (0, 0, 0)
+            rig_armature_object.rotation_euler = (0, 0, 0)
+            rig_armature_object.scale = (1, 1, 1)
             bpy.ops.object.mode_set(mode='EDIT')
             target_bone = rig_armature_object.data.edit_bones.get(
                 "ORG-Bip001Head")
             if target_bone:
-                logger.info("Positioning cursor at head bone")
                 context.scene.cursor.location = target_bone.head
             bpy.ops.object.mode_set(mode='OBJECT')
 
+        logger.info("Creating eye tracker bones")
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.armature.bone_primitive_add()
         new_bone = rig_armature_object.data.edit_bones[-1]
         new_bone.name = "EyeTracker"
-        head = new_bone.head
-        tail = new_bone.tail
+        head = new_bone.head.copy()
+        tail = new_bone.tail.copy()
         direction = tail - head
-        direction_length = direction.length
-
-        if direction_length > 0:
+        if direction.length > 0:
             direction.normalize()
             new_bone.tail = head + direction * 0.03
-
         new_bone.head.y -= 0.15
         new_bone.tail.y -= 0.15
         new_bone.head.z += 0.03
         new_bone.tail.z += 0.03
-        logger.info("Created EyeTracker bone")
-
         parent_bone = rig_armature_object.data.edit_bones.get("ORG-Bip001Head")
         if parent_bone:
             new_bone.parent = parent_bone
             new_bone.use_connect = False
-            logger.info("Parented EyeTracker to head bone")
-
+        eye_tracker_head = new_bone.head
+        eye_tracker_tail = new_bone.tail
+        eye_tracker_y_offset = new_bone.tail.y - new_bone.head.y
+        eye_tracker_z_offset = new_bone.tail.z - new_bone.head.z
+        eye_l = rig_armature_object.data.edit_bones.new("Eye.L")
+        eye_l.head = eye_tracker_head + mathutils.Vector((0.03, 0, 0))
+        eye_l.tail = eye_l.head + \
+            mathutils.Vector((0, eye_tracker_y_offset, eye_tracker_z_offset))
+        eye_l.parent = new_bone
+        eye_l.use_connect = False
+        eye_r = rig_armature_object.data.edit_bones.new("Eye.R")
+        eye_r.head = eye_tracker_head + mathutils.Vector((-0.03, 0, 0))
+        eye_r.tail = eye_r.head + \
+            mathutils.Vector((0, eye_tracker_y_offset, eye_tracker_z_offset))
+        eye_r.parent = new_bone
+        eye_r.use_connect = False
         context.scene.cursor.location = mathutils.Vector((0, 0, 0))
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        CharacterMesh = context.view_layer.objects.active
+        rig_armature_object.location = eye_tracker_location
+        rig_armature_object.rotation_euler = eye_tracker_rotation
+        rig_armature_object.scale = eye_tracker_scale
+
+        logger.info("Creating eye control widgets")
+        self.create_circle_widget(
+            "WGT-rig_eye.L", radius=0.1, location=(-0.3, 0, 0))
+        self.create_circle_widget(
+            "WGT-rig_eye.R", radius=0.1, location=(0.3, 0, 0))
+        self.create_double_capsule_widget(
+            "WGT-rig_eyes", inner_radius=0.14, outer_radius=0.17, spacing=0.6)
+
         if CharacterMesh is None or rig_armature_object is None:
-            logger.warning(
-                "Character mesh or rig armature not found for eye tracking setup")
             pass
         else:
-            logger.info("Setting up eye tracking shape key drivers")
             bpy.ops.object.select_all(action='DESELECT')
             last_selected_mesh = None
             for obj in context.scene.objects:
@@ -2234,15 +2451,11 @@ class WW_OT_Rigify(Operator):
                         if modifier.type == 'ARMATURE' and modifier.object == rig_armature_object:
                             obj.select_set(True)
                             last_selected_mesh = obj
-                            logger.info(
-                                f"Found mesh for eye tracking: {obj.name}")
-
             if last_selected_mesh:
                 context.view_layer.objects.active = last_selected_mesh
                 bpy.ops.object.mode_set(mode='OBJECT')
                 last_selected_mesh.select_set(False)
                 context.view_layer.objects.active = rig_armature_object
-
                 eye_tracker_bone_name = "EyeTracker"
                 shape_key_names = {
                     "Pupil_L": "LOC_X",
@@ -2256,8 +2469,6 @@ class WW_OT_Rigify(Operator):
                     "Pupil_Up": 'max(min((bone_y * 10), 1), 0) if bone_y > 0 else 0',
                     "Pupil_Down": 'max(min((-bone_y * 10), 1), 0) if bone_y < 0 else 0'
                 }
-
-                drivers_added = 0
                 if last_selected_mesh.data.shape_keys:
                     for shape_key_name, transform_axis in shape_key_names.items():
                         if shape_key_name in last_selected_mesh.data.shape_keys.key_blocks:
@@ -2272,46 +2483,165 @@ class WW_OT_Rigify(Operator):
                             var.targets[0].transform_type = transform_axis
                             var.targets[0].transform_space = 'LOCAL_SPACE'
                             driver.expression = expressions[shape_key_name]
-                            drivers_added += 1
-                            logger.info(
-                                f"Added driver for shape key {shape_key_name}")
-
-                logger.info(f"Added {drivers_added} eye tracking drivers")
+                    for bone_suffix in ['.L', '.R']:
+                        bone_name = "Eye" + bone_suffix
+                        for shape_key_prefix, transform_axis in shape_key_names.items():
+                            shape_key_name = shape_key_prefix + bone_suffix
+                            if shape_key_name in last_selected_mesh.data.shape_keys.key_blocks:
+                                shape_key = last_selected_mesh.data.shape_keys.key_blocks[shape_key_name]
+                                driver = shape_key.driver_add('value').driver
+                                driver.type = 'SCRIPTED'
+                                var = driver.variables.new()
+                                var.name = 'bone_' + transform_axis[-1].lower()
+                                var.type = 'TRANSFORMS'
+                                var.targets[0].id = rig_armature_object
+                                var.targets[0].bone_target = bone_name
+                                var.targets[0].transform_type = transform_axis
+                                var.targets[0].transform_space = 'LOCAL_SPACE'
+                                driver.expression = expressions[shape_key_prefix]
+                    logger.info("Set up eye tracking drivers")
                 bpy.ops.object.mode_set(mode='OBJECT')
+
+        logger.info("Configuring eye bone constraints")
+        context.view_layer.objects.active = rig_armature_object
+        bpy.ops.object.mode_set(mode='POSE')
+        bones_to_lock = ["EyeTracker", "Eye.L", "Eye.R"]
+        for bone_name in bones_to_lock:
+            if bone_name in rig_armature_object.pose.bones:
+                pbone = rig_armature_object.pose.bones[bone_name]
+                pbone.lock_location[0] = False
+                pbone.lock_location[1] = False
+                pbone.lock_location[2] = True
+                pbone.lock_rotation[0] = True
+                pbone.lock_rotation[1] = True
+                pbone.lock_rotation[2] = True
+                pbone.lock_rotations_4d = True
+        bpy.ops.object.mode_set(mode='OBJECT')
 
         context.view_layer.objects.active = rig_armature_object
         bpy.ops.object.mode_set(mode='POSE')
         pose_bones = rig_armature_object.pose.bones
-
-        if "root" in pose_bones and "EyeTracker" in pose_bones:
-            root_bone = pose_bones["root"]
-            eye_tracker_bone = pose_bones["EyeTracker"]
-            if root_bone.custom_shape:
-                eye_tracker_bone.custom_shape = root_bone.custom_shape
-                logger.info(
-                    "Assigned custom shape to EyeTracker from root bone")
-
+        custom_shapes = {
+            "EyeTracker": "WGT-rig_eyes",
+            "Eye.L": "WGT-rig_eye.L",
+            "Eye.R": "WGT-rig_eye.R"
+        }
+        for bone_name, shape_name in custom_shapes.items():
+            if bone_name in pose_bones and shape_name in bpy.data.objects:
+                bone = pose_bones[bone_name]
+                bone.custom_shape = bpy.data.objects[shape_name]
+                bone.custom_shape_scale_xyz = (4.0, 4.0, 4.0)
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        if rig_armature_object is None or rig_armature_object.type != 'ARMATURE':
-            logger.warning("No valid armature for neck/head FK setup")
-            pass
-        else:
-            logger.info("Setting up FK controls for neck and head")
+        mesh_names_to_delete = ["WGT-rig_eyes",
+                                "WGT-rig_eye.R", "WGT-rig_eye.L"]
+        bpy.ops.object.select_all(action='DESELECT')
+        for name in mesh_names_to_delete:
+            obj = bpy.data.objects.get(name)
+            if obj and obj.type == 'MESH':
+                if obj.name in context.view_layer.objects:
+                    obj.select_set(True)
+        bpy.ops.object.delete()
+
+        logger.info("Organizing bones into collections and setting colors")
+        bpy.ops.object.mode_set(mode='POSE')
+        armature = context.view_layer.objects.active
+        bones_to_move = {
+            0: ["torso", "chest", "Bip001Clavicle.L", "Bip001Clavicle.R", "hips", "Bip001Neck", "Bip001Head"],
+            1: ["Bip001Spine_fk", "Bip001Spine1_fk", "Bip001Spine2_fk", "tweak_Bip001Spine1",
+                "tweak_Bip001Spine2", "tweak_Bip001Spine2.001", "tweak_Bip001Spine", "tweak_Bip001Pelvis", "Bip001Pelvis_fk", "tweak_Bip001Neck"],
+            2: ["Bip001Finger0_master.L", "Bip001Finger1_master.L", "Bip001Finger2_master.L", "Bip001Finger3_master.L", "Bip001Finger4_master.L",
+                "Bip001Finger0_master.R", "Bip001Finger1_master.R", "Bip001Finger2_master.R", "Bip001Finger3_master.R", "Bip001Finger4_master.R",
+                "Bip001Finger11_master.L", "Bip001Finger21_master.L", "Bip001Finger21_master.L", "Bip001Finger31_master.L", "Bip001Finger41_master.L",
+                "Bip001Finger11_master.R", "Bip001Finger21_master.R", "Bip001Finger21_master.R", "Bip001Finger31_master.R", "Bip001Finger41_master.R"],
+            3: ["Bip001Finger01.L", "Bip001Finger02.L", "Bip001Finger0.L.001", "Bip001Finger1.L", "Bip001Finger11.L", "Bip001Finger12.L", "Bip001Finger1.L.001",
+                "Bip001Finger2.L", "Bip001Finger21.L", "Bip001Finger22.L", "Bip001Finger2.L.001", "Bip001Finger3.L", "Bip001Finger31.L", "Bip001Finger32.L", "Bip001Finger3.L.001",
+                "Bip001Finger4.L", "Bip001Finger41.L", "Bip001Finger42.L", "Bip001Finger4.L.001", "Bip001Finger0.L",
+                "Bip001Finger01.R", "Bip001Finger02.R", "Bip001Finger0.R.001", "Bip001Finger1.R", "Bip001Finger11.R", "Bip001Finger12.R", "Bip001Finger1.R.001",
+                "Bip001Finger2.R", "Bip001Finger21.R", "Bip001Finger22.R", "Bip001Finger2.R.001", "Bip001Finger3.R", "Bip001Finger31.R", "Bip001Finger32.R", "Bip001Finger3.R.001",
+                "Bip001Finger4.R", "Bip001Finger41.R", "Bip001Finger42.R", "Bip001Finger4.R.001", "Bip001Finger0.R",
+                "Bip001Finger13.L", "Bip001Finger11.L.001", "Bip001Finger23.L", "Bip001Finger21.L.001", "Bip001Finger33.L", "Bip001Finger31.L.001", "Bip001Finger43.L", "Bip001Finger41.L.001",
+                "Bip001Finger13.R", "Bip001Finger11.R.001", "Bip001Finger23.R", "Bip001Finger21.R.001", "Bip001Finger33.R", "Bip001Finger31.R.001", "Bip001Finger43.R", "Bip001Finger41.R.001"],
+            4: ["Bip001UpperArm_parent.L", "Bip001UpperArm_ik.L", "Bip001Hand_ik.L"],
+            5: ["Bip001UpperArm_parent.R", "Bip001UpperArm_ik.R", "Bip001Hand_ik.R"],
+            6: ["Bip001UpperArm_fk.L", "Bip001Forearm_fk.L", "Bip001Hand_fk.L"],
+            7: ["Bip001UpperArm_fk.R", "Bip001Forearm_fk.R", "Bip001Hand_fk.R"],
+            8: ["Bip001UpperArm_tweak.L", "Bip001UpperArm_tweak.L.001", "Bip001Forearm_tweak.L", "Bip001Forearm_tweak.L.001", "Bip001Hand_tweak.L"],
+            9: ["Bip001UpperArm_tweak.R", "Bip001UpperArm_tweak.R.001", "Bip001Forearm_tweak.R", "Bip001Forearm_tweak.R.001", "Bip001Hand_tweak.R"],
+            10: ["Bip001Thigh_parent.L", "Bip001Thigh_ik.L", "Bip001Foot_heel_ik.L", "Bip001Foot_spin_ik.L", "Bip001Toe0.L", "Bip001Foot_ik.L"],
+            11: ["Bip001Thigh_parent.R", "Bip001Thigh_ik.R", "Bip001Foot_heel_ik.R", "Bip001Foot_spin_ik.R", "Bip001Toe0.R", "Bip001Foot_ik.R"],
+            12: ["Bip001Thigh_fk.L", "Bip001Calf_fk.L", "Bip001Foot_fk.L"],
+            13: ["Bip001Thigh_fk.R", "Bip001Calf_fk.R", "Bip001Foot_fk.R"],
+            14: ["Bip001Thigh_tweak.L", "Bip001Thigh_tweak.L.001", "Bip001Calf_tweak.L", "Bip001Calf_tweak.L.001", "Bip001Foot_tweak.L"],
+            15: ["Bip001Thigh_tweak.R", "Bip001Thigh_tweak.R.001", "Bip001Calf_tweak.R", "Bip001Calf_tweak.R.001", "Bip001Foot_tweak.R"],
+        }
+        theme_for_groups = {
+            0: 'THEME09', 1: 'THEME04', 2: 'THEME14', 3: 'THEME03',
+            4: 'THEME01', 5: 'THEME01', 6: 'THEME03', 7: 'THEME03',
+            8: 'THEME04', 9: 'THEME04', 10: 'THEME01', 11: 'THEME01',
+            12: 'THEME03', 13: 'THEME03', 14: 'THEME04', 15: 'THEME04',
+        }
+        for group_index, bone_names in bones_to_move.items():
+            theme = theme_for_groups.get(group_index)
+            for bone_name in bone_names:
+                bone = armature.pose.bones.get(bone_name)
+                if bone and theme:
+                    bone.color.palette = theme
+
+        for collection_index, bone_names in bones_to_move.items():
+            bpy.ops.pose.select_all(action='DESELECT')
+            bones_found = False
+            for bone_name in bone_names:
+                bone = armature.pose.bones.get(bone_name)
+                if bone:
+                    bone.bone.select = True
+                    bones_found = True
+            if bones_found:
+                bpy.ops.armature.move_to_collection(
+                    collection_index=collection_index)
+
+        context.object.data.collections_all["ORG"].is_visible = True
+        bpy.ops.object.mode_set(mode='POSE')
+        armature = context.view_layer.objects.active
+
+        keywords_and_collections = [
+            ("Hair", 17), ("Earrings", 17), ("Piao", 18), ("Skirt", 19),
+            ("Trousers", 19), ("Other", 20), ("Weapon", 20), ("Prop", 20),
+            ("Chibang", 20), ("EyeTracker", 0), ("Bip001Neck.001", 21),
+            ("Bip001Head.001", 21), ("Chest", 0), ("Eye.L", 0), ("Eye.R", 0),
+        ]
+        for keyword, collection_index in keywords_and_collections:
+            self.select_and_move_bones(armature, keyword, collection_index)
+
+        context.object.data.collections_all["ORG"].is_visible = False
+        context.object.data.collections_all["Torso (Tweak)"].is_visible = False
+        context.object.data.collections_all["Arm.L (FK)"].is_visible = False
+        context.object.data.collections_all["Arm.R (FK)"].is_visible = False
+        context.object.data.collections_all["Leg.L (FK)"].is_visible = False
+        context.object.data.collections_all["Leg.R (FK)"].is_visible = False
+        context.object.data.collections_all["Hair"].is_visible = True
+        context.object.data.collections_all["Cloth"].is_visible = True
+        context.object.data.collections_all["Skirt"].is_visible = True
+
+        bpy.ops.object.mode_set(mode='POSE')
+        armature = context.view_layer.objects.active
+        pose_bones = armature.pose.bones
+        theme_assignments = {
+            "EyeTracker": "THEME01", "Eye.L": "THEME09", "Eye.R": "THEME09"
+        }
+        for bone_name, theme in theme_assignments.items():
+            bone = pose_bones.get(bone_name)
+            if bone:
+                bone.color.palette = theme
+
+        logger.info("Creating neck and head FK controls")
+        if rig_armature_object:
             bpy.ops.object.mode_set(mode='EDIT')
             arm = armature.data
-            bone_renames = 0
-
             if 'ORG-Bip001Neck' in arm.edit_bones:
                 arm.edit_bones['ORG-Bip001Neck'].name = 'Bip001Neck'
-                bone_renames += 1
-
             if 'ORG-Bip001Head' in arm.edit_bones:
                 arm.edit_bones['ORG-Bip001Head'].name = 'Bip001Head'
-                bone_renames += 1
-
-            logger.info(f"Renamed {bone_renames} ORG bones for FK control")
-
             if 'Bip001Neck' in arm.edit_bones:
                 neck_bone = arm.edit_bones['Bip001Neck']
                 new_bone = arm.edit_bones.new('Bip001Neck._fk')
@@ -2319,7 +2649,6 @@ class WW_OT_Rigify(Operator):
                 new_bone.tail = neck_bone.tail.copy()
                 new_bone.roll = neck_bone.roll
                 new_bone.parent = neck_bone.parent
-
                 rotation_matrix = mathutils.Matrix.Rotation(-1.5708, 4, 'X')
                 new_bone.tail = new_bone.head + \
                     rotation_matrix @ (new_bone.tail - new_bone.head)
@@ -2328,8 +2657,6 @@ class WW_OT_Rigify(Operator):
                 new_bone.tail = new_bone.head + direction * 0.05
                 neck_bone.use_connect = False
                 neck_bone.parent = new_bone
-                logger.info("Created FK control for neck")
-
             if 'Bip001Head' in arm.edit_bones:
                 head_bone = arm.edit_bones['Bip001Head']
                 new_bone = arm.edit_bones.new('Bip001Head._fk')
@@ -2337,7 +2664,6 @@ class WW_OT_Rigify(Operator):
                 new_bone.tail = head_bone.tail.copy()
                 new_bone.roll = head_bone.roll
                 new_bone.parent = head_bone.parent
-
                 new_bone.tail = new_bone.head + \
                     rotation_matrix @ (new_bone.tail - new_bone.head)
                 new_bone.tail.z = new_bone.head.z
@@ -2345,172 +2671,90 @@ class WW_OT_Rigify(Operator):
                 new_bone.tail = new_bone.head + direction * 0.05
                 head_bone.use_connect = False
                 head_bone.parent = new_bone
-                logger.info("Created FK control for head")
-
             bpy.ops.object.mode_set(mode='POSE')
-
             if "Bip001Neck._fk" in armature.pose.bones:
                 tweak_bone = armature.pose.bones["Bip001Neck._fk"]
                 spine2_fk = armature.pose.bones.get("Bip001Spine2_fk")
                 if spine2_fk:
                     tweak_bone.custom_shape = spine2_fk.custom_shape
                 tweak_bone.custom_shape_transform = armature.pose.bones["Bip001Neck"]
-                logger.info("Assigned custom shape to neck FK controller")
-
             if "Bip001Head._fk" in armature.pose.bones:
                 tweak_bone = armature.pose.bones["Bip001Head._fk"]
                 spine2_fk = armature.pose.bones.get("Bip001Spine2_fk")
                 if spine2_fk:
                     tweak_bone.custom_shape = spine2_fk.custom_shape
                 tweak_bone.custom_shape_transform = armature.pose.bones["Bip001Head"]
-                logger.info("Assigned custom shape to head FK controller")
-
-            bpy.context.object.data.collections_all["Torso (Tweak)"].is_visible = True
+            context.object.data.collections_all["Torso (Tweak)"].is_visible = True
             armature = context.view_layer.objects.active
             bones_to_move = {
                 0: ["Bip001Neck", "Bip001Head"],
                 1: ["Bip001Neck._fk", "Bip001Head._fk"],
             }
-            theme_for_groups = {
-                0: 'THEME09',
-                1: 'THEME04',
-            }
-
-            logger.info("Setting bone colors for neck and head controllers")
+            theme_for_groups = {0: 'THEME09', 1: 'THEME04', }
             for group_index, bone_names in bones_to_move.items():
                 theme = theme_for_groups.get(group_index)
-                bones_colored = 0
                 for bone_name in bone_names:
                     bone = armature.pose.bones.get(bone_name)
                     if bone and theme:
                         bone.color.palette = theme
-                        bones_colored += 1
-                logger.debug(
-                    f"Colored {bones_colored} neck/head bones in group {group_index}")
-
-            logger.info("Moving neck and head bones to collections")
             for collection_index, bone_names in bones_to_move.items():
                 bpy.ops.pose.select_all(action='DESELECT')
-                bones_moved = 0
+                bones_found = False
                 for bone_name in bone_names:
                     bone = armature.pose.bones.get(bone_name)
                     if bone:
                         bone.bone.select = True
-                        bones_moved += 1
-                bpy.ops.armature.move_to_collection(
-                    collection_index=collection_index)
-                logger.debug(
-                    f"Moved {bones_moved} neck/head bones to collection {collection_index}")
-
-            bpy.context.object.data.collections_all["Torso (Tweak)"].is_visible = False
+                        bones_found = True
+                if bones_found:
+                    bpy.ops.armature.move_to_collection(
+                        collection_index=collection_index)
+            context.object.data.collections_all["Torso (Tweak)"].is_visible = False
             bpy.ops.object.mode_set(mode='OBJECT')
+            logger.info("Created neck and head FK controls")
 
-        if rig_armature_object is None or rig_armature_object.type != 'ARMATURE':
-            logger.warning("No valid armature for bone length check")
-            pass
-        else:
-            logger.info("Checking for and fixing excessively long bones")
+        logger.info("Applying bone length constraints")
+        if rig_armature_object:
             obj = rig_armature_object
             if obj and obj.type == 'ARMATURE':
                 if bpy.context.mode != 'EDIT_ARMATURE':
                     bpy.ops.object.mode_set(mode='EDIT')
                 armature = obj.data
-                fixed_count = 0
                 for bone in armature.edit_bones:
                     length = (bone.head - bone.tail).length
                     if length > 1.0:
-                        logger.warning(
-                            f"Found excessively long bone: {bone.name} ({length:.2f} units)")
                         direction = (bone.tail - bone.head).normalized()
                         bone.tail = bone.head + direction * 0.5
-                        fixed_count += 1
-                logger.info(f"Fixed {fixed_count} excessively long bones")
                 bpy.ops.object.mode_set(mode='OBJECT')
 
+        logger.info("Finalizing rig setup")
         bpy.ops.object.select_all(action='DESELECT')
-
-        logger.info("Moving RIG armature to original location")
-        rig_armature_object = context.scene.objects.get(RigArmatureName)
-        if rig_armature_object:
-            rig_armature_object.location = original_armature_location
-            logger.info(f"Moved RIG armature to {original_armature_location}")
-
-            original_armature = bpy.data.objects.get(OrigArmature)
-            if original_armature:
-                original_armature.location = original_armature_location
-                logger.info(
-                    f"Restored original armature location to {original_armature_location}")
-
-        logger.info(
-            "Setting up parent-child relationship between rig and meshes")
-        meshes_with_rig_modifier = []
-        rig_armature_object = context.scene.objects.get(RigArmatureName)
-
-        if rig_armature_object:
-            for obj in context.scene.objects:
-                if obj.type == 'MESH':
-                    for modifier in obj.modifiers:
-                        if modifier.type == 'ARMATURE' and modifier.object == rig_armature_object:
-                            meshes_with_rig_modifier.append(obj)
-                            logger.info(
-                                f"Found mesh using RIG armature in modifier: {obj.name}")
-
-            parent_count = 0
-            for mesh in meshes_with_rig_modifier:
-                bpy.ops.object.select_all(action='DESELECT')
-                mesh.select_set(True)
-                rig_armature_object.select_set(True)
-                context.view_layer.objects.active = rig_armature_object
-                bpy.ops.object.parent_set(type='OBJECT', keep_transform=True)
-                parent_count += 1
-                logger.info(
-                    f"Set {mesh.name} as child of {rig_armature_object.name} with keep_transform")
-
-            logger.info(
-                f"Set up parent-child relationships for {parent_count} meshes")
-
-        if rig_armature_object:
-            rig_armature_object['rigify_generated'] = True
-            logger.info(
-                f"Marked {RigArmatureName} as a rigify-generated armature")
-
-        logger.info("Hiding original armature")
-        original_armature = context.scene.objects.get(OrigArmature)
+        original_armature = bpy.data.objects.get(OrigArmature)
         if original_armature and original_armature.type == 'ARMATURE':
             bpy.ops.object.select_all(action='DESELECT')
             original_armature.select_set(True)
             context.view_layer.objects.active = original_armature
             original_armature.hide_set(True)
-            logger.info(f"Original armature {OrigArmature} hidden")
-
-        bpy.ops.object.select_all(action='DESELECT')
-
-        if bpy.context.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
+            logger.info(f"Hidden original armature '{OrigArmature}'")
 
         if original_selected_object_type == 'MESH':
             original_mesh = bpy.data.objects.get(original_selected_object_name)
             if original_mesh:
                 context.view_layer.objects.active = original_mesh
                 original_mesh.select_set(True)
-                logger.info(f"Selected original mesh: {original_mesh.name}")
             else:
                 if CharacterMesh:
                     context.view_layer.objects.active = CharacterMesh
                     CharacterMesh.select_set(True)
-                    logger.info(
-                        f"Selected character mesh: {CharacterMesh.name}")
         else:
-            rig_armature_object = context.scene.objects.get(RigArmatureName)
+            rig_armature_object = context.scene.objects.get(RigArmature)
             if rig_armature_object:
                 context.view_layer.objects.active = rig_armature_object
                 rig_armature_object.select_set(True)
-                logger.info(f"Selected rig armature: {RigArmatureName}")
 
-        self.report({"INFO"}, f"Rigify completed for {RigArmatureName}")
         logger.info(
-            f"Rigify process completed successfully for {RigArmatureName}")
-
+            f"Rigify process completed successfully for '{RigArmature}'")
+        self.report(
+            {"INFO"}, f"Rigify completed successfully for '{RigArmature}'. Original armature hidden, rig ready for animation.")
         return {"FINISHED"}
 
 
@@ -2717,6 +2961,995 @@ class WW_OT_SetupHeadDriver(Operator):
         if active_obj:
             active_obj.select_set(True)
             context.view_layer.objects.active = active_obj
+
+
+class WW_OT_CreateFacePanel(Operator):
+    bl_idname = "shader.create_face_panel"
+    bl_label = "Create Face Panel"
+    bl_description = "Create a face panel for the selected character"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not context.active_object:
+            return False
+        obj = context.active_object
+        if obj.type == 'MESH':
+            for mod in obj.modifiers:
+                if mod.type == 'ARMATURE' and mod.object:
+                    return True
+        elif obj.type == 'ARMATURE':
+            return True
+        return False
+
+    def execute(self, context):
+        initial_active_object = context.active_object
+        initial_selected_objects = context.selected_objects[:]
+
+        obj = context.active_object
+        if obj.type == 'MESH':
+            for mod in obj.modifiers:
+                if mod.type == 'ARMATURE' and mod.object:
+                    armature_obj = mod.object
+                    break
+            else:
+                self.report(
+                    {'ERROR'}, "No armature modifier found on the selected mesh.")
+                return {'CANCELLED'}
+        elif obj.type == 'ARMATURE':
+            armature_obj = obj
+        else:
+            self.report(
+                {'ERROR'}, "Selected object is neither a mesh nor an armature.")
+            return {'CANCELLED'}
+
+        if not armature_obj.name.startswith("RIG-"):
+            self.report(
+                {'ERROR'}, "Selected armature is not a Rigify-generated armature.")
+            return {'CANCELLED'}
+
+        if armature_obj.get('face_panel_created', False):
+            self.report(
+                {'ERROR'}, "Face panel has already been created for this armature.")
+            return {'CANCELLED'}
+
+        try:
+            bpy.context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            edit_bones = armature_obj.data.edit_bones
+
+            eye_tracker_bone = edit_bones.get("EyeTracker")
+            if not eye_tracker_bone:
+                raise Exception("Bone 'EyeTracker' not found.")
+            eye_tracker_pos = eye_tracker_bone.head.copy()
+
+            face_panel_root = edit_bones.new("FacePanelRoot")
+            face_panel_root.head = eye_tracker_pos
+            face_panel_root.tail = eye_tracker_pos + \
+                mathutils.Vector((0.0, 0.0, 0.02))
+            face_panel_root.use_connect = False
+
+            parent_bone = edit_bones.get("Bip001Head.001")
+            if parent_bone:
+                face_panel_root.parent = parent_bone
+
+            face_panel = edit_bones.new("FacePanel")
+            face_panel.head = eye_tracker_pos
+            face_panel.tail = eye_tracker_pos + \
+                mathutils.Vector((0.0, 0.0, 0.01))
+            face_panel.use_connect = False
+            face_panel.parent = face_panel_root
+
+            eye_scale = edit_bones.new("EyeScale")
+            eye_scale.head = face_panel.head - \
+                mathutils.Vector((0.0, 0.0, 0.01))
+            eye_scale.tail = eye_scale.head + \
+                mathutils.Vector((0.0, 0.0, 0.01))
+            eye_scale.use_connect = False
+            eye_scale.parent = face_panel
+
+            for bone_name in ["Eye.L", "Eye.R"]:
+                bone = edit_bones.get(bone_name)
+                if bone:
+                    bone.parent = face_panel
+
+            eye_tracker_bone.parent = face_panel_root
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            pose_bones = armature_obj.pose.bones
+            if "FacePanel" in pose_bones and "EyeTracker" in pose_bones:
+                face_panel_pose = pose_bones["FacePanel"]
+                constraint = face_panel_pose.constraints.new(
+                    type='COPY_LOCATION')
+                constraint.name = "FollowEyeTracker"
+                constraint.target = armature_obj
+                constraint.subtarget = "EyeTracker"
+
+            bpy.ops.object.mode_set(mode='EDIT')
+
+            def create_fan_bones(base_bone_name, custom_bone_names, side_suffix):
+                base_bone = edit_bones.get(base_bone_name)
+                if not base_bone:
+                    raise Exception(f"Base bone '{base_bone_name}' not found.")
+
+                fan_center = base_bone.head
+                radius = 0.035
+                bone_length = 0.02
+                num_bones = len(custom_bone_names)
+                arc_angle = math.radians(120)
+                angle_start = -arc_angle / 2
+
+                for i in range(num_bones):
+                    angle = angle_start + i * (arc_angle / (num_bones - 1))
+                    direction_multiplier = -1 if side_suffix == ".R" else 1
+
+                    head_x = math.cos(angle) * radius * direction_multiplier
+                    head_z = math.sin(angle) * radius
+                    head = fan_center + mathutils.Vector((head_x, 0, head_z))
+                    tail = head + \
+                        (head - fan_center).normalized() * bone_length
+
+                    bone_name = custom_bone_names[i].replace(".L", side_suffix)
+                    fan_bone = edit_bones.new(bone_name)
+                    fan_bone.head = head
+                    fan_bone.tail = tail
+                    fan_bone.parent = edit_bones["FacePanel"]
+                    fan_bone.use_connect = False
+
+            def adjust_bone_roll():
+                bone_rolls = {
+                    "Smile.L": 30,
+                    "Anger.L": 60,
+                    "Sad.L": 90,
+                    "Focus.L": 120,
+                    "Insipid.L": 150,
+                }
+
+                for bone_name, roll_deg in bone_rolls.items():
+                    bone = edit_bones.get(bone_name)
+                    if bone:
+                        bone.roll = math.radians(roll_deg)
+                    bone_R = edit_bones.get(bone_name.replace(".L", ".R"))
+                    if bone_R:
+                        bone_R.roll = -math.radians(roll_deg)
+
+            custom_bone_names_L = ["Insipid.L",
+                                   "Focus.L", "Sad.L", "Anger.L", "Smile.L"]
+            custom_bone_names_R = [name.replace(
+                ".L", ".R") for name in custom_bone_names_L]
+
+            create_fan_bones("Eye.L", custom_bone_names_L, ".L")
+            create_fan_bones("Eye.R", custom_bone_names_R, ".R")
+
+            adjust_bone_roll()
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            bpy.ops.object.mode_set(mode='EDIT')
+            edit_bones = bpy.context.object.data.edit_bones
+
+            face_panel = edit_bones.get("FacePanel")
+            if not face_panel:
+                raise Exception("FacePanel bone not found.")
+
+            eyebrows_bone = edit_bones.new("Eyebrows")
+            eyebrows_head = face_panel.head + mathutils.Vector((0, 0, 0.06))
+            eyebrows_bone.head = eyebrows_head
+            eyebrows_bone.tail = eyebrows_head + mathutils.Vector((0, 0, 0.01))
+            eyebrows_bone.parent = face_panel
+            eyebrows_bone.use_connect = False
+
+            b_names = ["B_Anger", "B_Happy", "B_Cheerful",
+                       "B_Sad", "B_Flat", "B_Inside_Add"]
+            spacing = 0.015
+            start_x = -spacing * (len(b_names) - 1) / 2
+            y = eyebrows_head.y
+            z = eyebrows_bone.tail.z
+
+            for i, name in enumerate(b_names):
+                b = edit_bones.new(name)
+                head = mathutils.Vector((start_x + i * spacing, y, z))
+                tail = head + mathutils.Vector((0, 0, 0.02))
+                b.head = head
+                b.tail = tail
+                b.parent = eyebrows_bone
+                b.use_connect = False
+
+            mouth_panel_bone = edit_bones.new("MouthPanel")
+            mouth_panel_head = face_panel.head - \
+                mathutils.Vector((0, 0, 0.055))
+            mouth_panel_bone.head = mouth_panel_head
+            mouth_panel_bone.tail = mouth_panel_head + \
+                mathutils.Vector((0, 0, 0.01))
+            mouth_panel_bone.parent = face_panel
+            mouth_panel_bone.use_connect = False
+
+            mouth_bone = edit_bones.new("Mouth")
+            mouth_bone.head = mouth_panel_head
+            mouth_bone.tail = mouth_bone.head + mathutils.Vector((0, 0, 0.02))
+            mouth_bone.parent = mouth_panel_bone
+            mouth_bone.use_connect = False
+
+            offset_x = 0.045
+            y = mouth_bone.head.y
+            z = mouth_bone.head.z
+            length = 0.02
+
+            for side in [("Mouth.L", offset_x), ("Mouth.R", -offset_x)]:
+                name, x_offset = side
+                b = edit_bones.new(name)
+                head = mathutils.Vector((mouth_bone.head.x + x_offset, y, z))
+                tail = head + mathutils.Vector((0, 0, length))
+                b.head = head
+                b.tail = tail
+                b.parent = mouth_panel_bone
+                b.use_connect = False
+
+            expressions = [
+                "Aa", "M_OpenSmall", "M_Laugh", "M_Scared", "M_ScaredTooth",
+                "M_Anger", "M_Trapezoid", "M_Nutcracker", "M_O", "M_A"
+            ]
+
+            num = len(expressions)
+            spacing = 0.01
+            total_width = (num - 1) * spacing
+            start_x = mouth_panel_head.x - total_width / 2
+            y = mouth_panel_head.y
+            z = mouth_panel_head.z - 0.035
+
+            for i, name in enumerate(expressions):
+                b = edit_bones.new(name)
+                head = mathutils.Vector((start_x + i * spacing, y, z))
+                tail = head - mathutils.Vector((0, 0, 0.02))
+                b.head = head
+                b.tail = tail
+                b.parent = mouth_panel_bone
+                b.use_connect = False
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            def create_outline(name, verts_2d):
+                full_name = f"Custom{name}"
+                if full_name in bpy.data.objects:
+                    return
+                mesh = bpy.data.meshes.new(full_name)
+                obj = bpy.data.objects.new(full_name, mesh)
+                bpy.context.collection.objects.link(obj)
+
+                bm = bmesh.new()
+                verts = []
+                for x, y in verts_2d:
+                    verts.append(bm.verts.new((x, y, 0)))
+                bm.verts.ensure_lookup_table()
+
+                for i in range(len(verts)):
+                    bm.edges.new((verts[i], verts[(i + 1) % len(verts)]))
+
+                bm.to_mesh(mesh)
+                bm.free()
+                return obj
+
+            def create_lines(name, line_pairs):
+                full_name = f"Custom{name}"
+                if full_name in bpy.data.objects:
+                    return
+                mesh = bpy.data.meshes.new(full_name)
+                obj = bpy.data.objects.new(full_name, mesh)
+                bpy.context.collection.objects.link(obj)
+
+                bm = bmesh.new()
+                for (x1, y1), (x2, y2) in line_pairs:
+                    v1 = bm.verts.new((x1, y1, 0))
+                    v2 = bm.verts.new((x2, y2, 0))
+                    bm.edges.new((v1, v2))
+
+                bm.to_mesh(mesh)
+                bm.free()
+                return obj
+
+            triangle_points = [
+                (0, 1),
+                (-1, -1),
+                (1, -1),
+            ]
+
+            diamond_points = [
+                (0, 1),
+                (-1, 0),
+                (0, -1),
+                (1, 0),
+            ]
+
+            square_points = [
+                (-1, 1),
+                (1, 1),
+                (1, -1),
+                (-1, -1),
+            ]
+
+            plus_cross_lines = [
+                [(-1, 0), (1, 0)],
+                [(0, -1), (0, 1)],
+            ]
+
+            create_outline("Triangle", triangle_points)
+            create_outline("Diamond", diamond_points)
+            create_outline("Square", square_points)
+            create_lines("Cross", plus_cross_lines)
+
+            bpy.ops.object.mode_set(mode='POSE')
+
+            bone_shape_map = {
+                "Eyebrows": "CustomSquare",
+                "Mouth": "CustomDiamond",
+                "Mouth.L": "CustomDiamond",
+                "Mouth.R": "CustomDiamond",
+                "Smile.L": "CustomTriangle",
+                "Anger.L": "CustomTriangle",
+                "Sad.L": "CustomTriangle",
+                "Focus.L": "CustomTriangle",
+                "Insipid.L": "CustomTriangle",
+                "Smile.R": "CustomTriangle",
+                "Anger.R": "CustomTriangle",
+                "Sad.R": "CustomTriangle",
+                "Focus.R": "CustomTriangle",
+                "Insipid.R": "CustomTriangle",
+                "B_Anger": "CustomTriangle",
+                "B_Happy": "CustomTriangle",
+                "B_Cheerful": "CustomTriangle",
+                "B_Sad": "CustomTriangle",
+                "B_Flat": "CustomTriangle",
+                "B_Inside_Add": "CustomTriangle",
+                "Mouth": "WGT-rig_eyes",
+                "M_OpenSmall": "CustomTriangle",
+                "M_Laugh": "CustomTriangle",
+                "M_Scared": "CustomTriangle",
+                "M_ScaredTooth": "CustomTriangle",
+                "M_Anger": "CustomTriangle",
+                "M_Trapezoid": "CustomTriangle",
+                "M_Nutcracker": "CustomTriangle",
+                "MouthPanel": "CustomCross",
+                "EyeScale": "CustomSquare",
+                "Aa": "CustomTriangle",
+                "M_A": "CustomTriangle",
+                "M_O": "CustomTriangle",
+            }
+
+            for bone_name, shape_name in bone_shape_map.items():
+                pbone = armature_obj.pose.bones.get(bone_name)
+                shape_obj = bpy.data.objects.get(shape_name)
+
+                if not pbone or not shape_obj:
+                    continue
+
+                pbone.custom_shape = shape_obj
+
+                if bone_name == "EyeScale":
+                    pbone.custom_shape_scale_xyz = (1.0, 0.1, 1.0)
+                elif shape_name == "CustomTriangle":
+                    pbone.custom_shape_scale_xyz = (0.2, 0.2, 1.0)
+                elif shape_name == "CustomSquare":
+                    pbone.custom_shape_scale_xyz = (4.5, 0.2, 1.0)
+                elif shape_name == "CustomDiamond":
+                    if bone_name in ["Mouth.L", "Mouth.R"]:
+                        pbone.custom_shape_scale_xyz = (0.2, 0.2, 1.0)
+                    else:
+                        pbone.custom_shape_scale_xyz = (0.5, 0.5, 1.0)
+                elif shape_name == "WGT-rig_eyes":
+                    pbone.custom_shape_scale_xyz = (2.0, 2.0, 1.0)
+                elif shape_name == "CustomCross":
+                    pbone.custom_shape_scale_xyz = (4.0, 2.5, 1.0)
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            bpy.ops.object.mode_set(mode='POSE')
+
+            for pbone in armature_obj.pose.bones:
+                shape = pbone.custom_shape
+
+                pbone.lock_location = (False, False, False)
+                pbone.lock_rotation = (False, False, False)
+                pbone.lock_scale = (False, False, False)
+
+                for con in list(pbone.constraints):
+                    if con.type in {'LIMIT_LOCATION', 'LIMIT_ROTATION', 'LIMIT_SCALE'}:
+                        pbone.constraints.remove(con)
+
+                shape_name = shape.name if shape else ""
+
+                if shape_name == "CustomTriangle":
+                    pbone.lock_location = (True, False, True)
+                    pbone.lock_rotation = (True, True, True)
+                    pbone.lock_scale = (True, True, True)
+
+                    con = pbone.constraints.new(type='LIMIT_LOCATION')
+                    con.use_min_y = True
+                    con.use_max_y = True
+                    con.min_y = 0.0
+                    con.max_y = 0.02
+                    con.owner_space = 'LOCAL'
+                    con.use_transform_limit = True
+
+                elif pbone.name == "EyeScale":
+                    pbone.lock_location = (True, False, True)
+                    pbone.lock_rotation = (True, True, True)
+                    pbone.lock_scale = (False, True, True)
+
+                    con_loc = pbone.constraints.new(type='LIMIT_LOCATION')
+                    con_loc.use_min_y = con_loc.use_max_y = True
+                    con_loc.min_y = 0.0
+                    con_loc.max_y = 0.01
+                    con_loc.owner_space = 'LOCAL'
+                    con_loc.use_transform_limit = True
+
+                    con_scale = pbone.constraints.new(type='LIMIT_SCALE')
+                    con_scale.use_min_x = con_scale.use_max_x = True
+                    con_scale.min_x = 0.5
+                    con_scale.max_x = 1
+                    con_scale.owner_space = 'LOCAL'
+                    con_scale.use_transform_limit = True
+
+                elif shape_name == "CustomSquare":
+                    pbone.lock_location = (True, False, True)
+                    pbone.lock_rotation = (True, True, False)
+                    pbone.lock_scale = (True, True, True)
+                    pbone.rotation_mode = 'XYZ'
+
+                    con_loc = pbone.constraints.new(type='LIMIT_LOCATION')
+                    con_loc.use_min_y = True
+                    con_loc.use_max_y = True
+                    con_loc.min_y = -0.01
+                    con_loc.max_y = 0.01
+                    con_loc.owner_space = 'LOCAL'
+                    con_loc.use_transform_limit = True
+
+                    con_rot = pbone.constraints.new(type='LIMIT_ROTATION')
+                    con_rot.use_limit_z = True
+                    con_rot.min_z = -math.radians(10)
+                    con_rot.max_z = math.radians(10)
+                    con_rot.owner_space = 'LOCAL'
+                    con_rot.use_transform_limit = True
+
+                elif pbone.name == "Mouth":
+                    pbone.lock_location = (False, False, True)
+                    pbone.lock_rotation = (True, True, True)
+
+                    con = pbone.constraints.new(type='LIMIT_LOCATION')
+                    con.use_min_x = con.use_max_x = True
+                    con.use_min_y = con.use_max_y = True
+                    con.min_x = -0.02
+                    con.max_x = 0.02
+                    con.min_y = -0.02
+                    con.max_y = 0.02
+                    con.owner_space = 'LOCAL'
+                    con.use_transform_limit = True
+
+                    con_scale = pbone.constraints.new(type='LIMIT_SCALE')
+                    con_scale.use_min_x = con_scale.use_max_x = True
+                    con_scale.use_min_y = con_scale.use_max_y = True
+                    con_scale.use_min_z = con_scale.use_max_z = True
+                    con_scale.min_x = con_scale.min_y = con_scale.min_z = 1.0
+                    con_scale.max_x = con_scale.max_y = con_scale.max_z = 1.5
+                    con_scale.owner_space = 'LOCAL'
+                    con_scale.use_transform_limit = True
+
+                elif pbone.name in {"Mouth.L", "Mouth.R"}:
+                    pbone.lock_location = (False, False, True)
+                    pbone.lock_rotation = (True, True, True)
+                    pbone.lock_scale = (True, True, True)
+
+                    con = pbone.constraints.new(type='LIMIT_LOCATION')
+                    con.use_min_x = con.use_max_x = True
+                    con.use_min_y = True
+                    con.use_max_y = True
+                    con.min_x = -0.01
+                    con.max_x = 0.01
+                    con.min_y = -0.01
+                    con.max_y = 0.01
+                    con.owner_space = 'LOCAL'
+                    con.use_transform_limit = True
+
+                elif pbone.name == "EyeTracker":
+                    pbone.lock_rotation = (True, True, True)
+                    pbone.lock_scale = (True, False, True)
+
+                    pbone.lock_location[2] = True
+
+                    con = pbone.constraints.new(type='LIMIT_SCALE')
+                    con.use_min_y = True
+                    con.use_max_y = True
+                    con.min_y = 0.5
+                    con.max_y = 1.5
+                    con.owner_space = 'LOCAL'
+                    con.use_transform_limit = True
+
+                elif pbone.name in {"Eye.L", "Eye.R"}:
+                    pbone.lock_rotation = (True, True, True)
+                    pbone.lock_scale = (True, False, True)
+
+                    pbone.lock_location[2] = True
+
+                    con = pbone.constraints.new(type='LIMIT_SCALE')
+                    con.use_min_y = True
+                    con.use_max_y = True
+                    con.min_y = 0.5
+                    con.max_y = 1.0
+                    con.owner_space = 'LOCAL'
+                    con.use_transform_limit = True
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            CharacterMesh = None
+            for obj in bpy.data.objects:
+                if obj.type == 'MESH':
+                    for mod in obj.modifiers:
+                        if mod.type == 'ARMATURE' and mod.object == armature_obj:
+                            CharacterMesh = obj
+                            break
+                if CharacterMesh:
+                    break
+
+            if not CharacterMesh:
+                raise Exception(
+                    "No mesh found with an Armature modifier using the selected armature.")
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+            CharacterMesh.select_set(True)
+            bpy.context.view_layer.objects.active = CharacterMesh
+
+            obj = CharacterMesh
+            shape_keys_to_split = ["E_Close", "E_Anger",
+                                   "E_Sad", "E_Focus", "E_Insipid", "P_M_Scale_Add"]
+
+            if obj.data.shape_keys:
+                keys = obj.data.shape_keys.key_blocks
+                basis = obj.data.shape_keys.reference_key
+
+                for source_name in shape_keys_to_split:
+                    if source_name not in keys:
+                        continue
+
+                    source_key = keys[source_name]
+
+                    obj.active_shape_key_index = list(keys).index(source_key)
+
+                    bpy.ops.object.shape_key_add(from_mix=False)
+                    key_L = obj.data.shape_keys.key_blocks[-1]
+                    key_L.name = f"{source_name}.L"
+
+                    bpy.ops.object.shape_key_add(from_mix=False)
+                    key_R = obj.data.shape_keys.key_blocks[-1]
+                    key_R.name = f"{source_name}.R"
+
+                    for i, vert in enumerate(basis.data):
+                        base_co = vert.co
+                        delta = source_key.data[i].co - base_co
+
+                        if base_co.x >= 0:
+                            key_L.data[i].co = base_co + delta
+                            key_R.data[i].co = base_co
+                        else:
+                            key_R.data[i].co = base_co + delta
+                            key_L.data[i].co = base_co
+
+            CharacterMesh.select_set(False)
+            bpy.context.view_layer.objects.active = armature_obj
+            armature_obj.select_set(True)
+
+            shape_key_mappings = {
+                "Smile.L": {"shape_key": "E_Smile_L", "var_type": "LOC_Y"},
+                "Smile.R": {"shape_key": "E_Smile_R", "var_type": "LOC_Y"},
+                "Anger.L": {"shape_key": "E_Anger.L", "var_type": "LOC_Y"},
+                "Sad.L": {"shape_key": "E_Sad.L", "var_type": "LOC_Y"},
+                "Focus.L": {"shape_key": "E_Focus.L", "var_type": "LOC_Y"},
+                "Insipid.L": {"shape_key": "E_Insipid.L", "var_type": "LOC_Y"},
+                "Anger.R": {"shape_key": "E_Anger.R", "var_type": "LOC_Y"},
+                "Sad.R": {"shape_key": "E_Sad.R", "var_type": "LOC_Y"},
+                "Focus.R": {"shape_key": "E_Focus.R", "var_type": "LOC_Y"},
+                "Insipid.R": {"shape_key": "E_Insipid.R", "var_type": "LOC_Y"},
+                "B_Anger": {"shape_key": "B_Anger", "var_type": "LOC_Y"},
+                "B_Happy": {"shape_key": "B_Happy", "var_type": "LOC_Y"},
+                "B_Cheerful": {"shape_key": "B_Cheerful", "var_type": "LOC_Y"},
+                "B_Sad": {"shape_key": "B_Sad", "var_type": "LOC_Y"},
+                "B_Flat": {"shape_key": "B_Flat", "var_type": "LOC_Y"},
+                "B_Inside_Add": {"shape_key": "B_Inside_Add", "var_type": "LOC_Y"},
+                "EyeScale": {"shape_key": "E_Blephar", "var_type": "LOC_Y"}
+            }
+
+            mouth_mappings = {
+                "Mouth.L": {
+                    "positive_shape": "M_Smile_L",
+                    "negative_shape": "M_Ennui_L",
+                    "multiplier": 50,
+                    "var_type": "LOC_Y"
+                },
+                "Mouth.R": {
+                    "positive_shape": "M_Smile_R",
+                    "negative_shape": "M_Ennui_R",
+                    "multiplier": 50,
+                    "var_type": "LOC_Y"
+                }
+            }
+
+            mouth_x_mappings = {
+                "Mouth.L": {
+                    "negative_shape": "P_M_Scale_Add.L",
+                    "positive_shape": "P_M_L_Add"
+                },
+                "Mouth.R": {
+                    "negative_shape": "P_M_R_Add",
+                    "positive_shape": "P_M_Scale_Add.R"
+                }
+            }
+
+            for bone_name, mapping in shape_key_mappings.items():
+                if bone_name not in armature_obj.pose.bones:
+                    continue
+
+                bone = armature_obj.pose.bones[bone_name]
+
+                if not CharacterMesh.data.shape_keys:
+                    continue
+
+                shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                    mapping["shape_key"])
+                if not shape_key:
+                    continue
+
+                driver = shape_key.driver_add('value').driver
+                driver.type = 'SCRIPTED'
+
+                var = driver.variables.new()
+                var.name = 'bone_var'
+                var.targets[0].id = armature_obj
+                var.targets[0].data_path = (
+                    f'pose.bones["{bone.name}"].location.y' if mapping["var_type"] == "LOC_Y"
+                    else f'pose.bones["{bone.name}"].location.x'
+                )
+
+                driver.expression = "bone_var * 50"
+
+            for bone_name, mapping in mouth_mappings.items():
+                if bone_name not in armature_obj.pose.bones:
+                    continue
+
+                bone = armature_obj.pose.bones[bone_name]
+                multiplier = mapping["multiplier"]
+
+                if mapping["positive_shape"]:
+                    shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                        mapping["positive_shape"])
+                    if shape_key:
+                        driver = shape_key.driver_add('value').driver
+                        driver.type = 'SCRIPTED'
+
+                        var = driver.variables.new()
+                        var.name = 'mouth_y'
+                        var.targets[0].id = armature_obj
+                        var.targets[0].data_path = f'pose.bones["{bone.name}"].location.y'
+
+                        driver.expression = f'max(mouth_y * {multiplier}, 0)'
+
+                if mapping["negative_shape"]:
+                    shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                        mapping["negative_shape"])
+                    if shape_key:
+                        driver = shape_key.driver_add('value').driver
+                        driver.type = 'SCRIPTED'
+
+                        var = driver.variables.new()
+                        var.name = 'mouth_y'
+                        var.targets[0].id = armature_obj
+                        var.targets[0].data_path = f'pose.bones["{bone.name}"].location.y'
+
+                        driver.expression = f'max(-mouth_y * {multiplier}, 0)'
+
+            for bone_name, mapping in mouth_x_mappings.items():
+                if bone_name not in armature_obj.pose.bones:
+                    continue
+
+                bone = armature_obj.pose.bones[bone_name]
+                x_data_path = f'pose.bones["{bone.name}"].location.x'
+
+                pos_shape = CharacterMesh.data.shape_keys.key_blocks.get(
+                    mapping["positive_shape"])
+                if pos_shape:
+                    driver = pos_shape.driver_add('value').driver
+                    driver.type = 'SCRIPTED'
+
+                    var = driver.variables.new()
+                    var.name = 'x_pos'
+                    var.targets[0].id = armature_obj
+                    var.targets[0].data_path = x_data_path
+
+                    driver.expression = 'max(min(x_pos / 0.01, 1), 0)'
+
+                neg_shape = CharacterMesh.data.shape_keys.key_blocks.get(
+                    mapping["negative_shape"])
+                if neg_shape:
+                    driver = neg_shape.driver_add('value').driver
+                    driver.type = 'SCRIPTED'
+
+                    var = driver.variables.new()
+                    var.name = 'x_neg'
+                    var.targets[0].id = armature_obj
+                    var.targets[0].data_path = x_data_path
+
+                    driver.expression = 'max(min(-x_neg / 0.01, 1), 0)'
+
+            eye_scale_mappings = {
+                "EyeTracker": "E_Close",
+                "Eye.L": "E_Close.L",
+                "Eye.R": "E_Close.R",
+                "EyeScale": "Pupil_Scale",
+            }
+
+            for bone_name, shape_key_name in eye_scale_mappings.items():
+                if bone_name not in armature_obj.pose.bones:
+                    continue
+
+                shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                    shape_key_name)
+                if not shape_key:
+                    continue
+
+                driver = shape_key.driver_add('value').driver
+                driver.type = 'SCRIPTED'
+
+                var = driver.variables.new()
+                var.name = 'scaleval'
+                var.targets[0].id = armature_obj
+
+                if bone_name == "EyeScale":
+                    var.targets[0].data_path = f'pose.bones["{bone_name}"].scale.x'
+                    driver.expression = '(1 - scaleval) * 2'
+                else:
+                    var.targets[0].data_path = f'pose.bones["{bone_name}"].scale.y'
+                    driver.expression = '(1 - scaleval) * 2'
+
+            bone_name = "EyeTracker"
+            shape_key_name = "E_Stare"
+
+            if bone_name in armature_obj.pose.bones:
+                shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                    shape_key_name)
+                if shape_key:
+                    driver = shape_key.driver_add('value').driver
+                    driver.type = 'SCRIPTED'
+
+                    var = driver.variables.new()
+                    var.name = 'yscale'
+                    var.targets[0].id = armature_obj
+                    var.targets[0].data_path = f'pose.bones["{bone_name}"].scale.y'
+
+                    driver.expression = 'max(min((yscale - 1) * 2, 1), 0)'
+
+            vowel_shapes = {
+                "E": {"axis": "x", "direction": -1, "max_value": 0.02},
+                "I": {"axis": "x", "direction": 1, "max_value": 0.02},
+                "A": {"axis": "y", "direction": 1, "max_value": 0.02},
+                "U": {"axis": "y", "direction": -1, "max_value": 0.02},
+            }
+
+            mouth_bone = armature_obj.pose.bones.get("Mouth")
+            if mouth_bone:
+                for shape_key_name, info in vowel_shapes.items():
+                    shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                        shape_key_name)
+                    if not shape_key:
+                        continue
+
+                    driver = shape_key.driver_add('value').driver
+                    driver.type = 'SCRIPTED'
+
+                    var_main = driver.variables.new()
+                    var_main.name = 'coord'
+                    var_main.targets[0].id = armature_obj
+                    var_main.targets[0].data_path = f'pose.bones["Mouth"].location.{info["axis"]}'
+
+                    var_o = driver.variables.new()
+                    var_o.name = 'oval'
+                    var_o.targets[0].id_type = 'KEY'
+                    var_o.targets[0].id = CharacterMesh.data.shape_keys
+                    var_o.targets[0].data_path = 'key_blocks["O"].value'
+
+                    if shape_key_name in ["E", "I"]:
+                        var_y = driver.variables.new()
+                        var_y.name = 'yval'
+                        var_y.targets[0].id = armature_obj
+                        var_y.targets[0].data_path = 'pose.bones["Mouth"].location.y'
+
+                        driver.expression = (
+                            f"(1 - oval * 0.6) * "
+                            f"(1 - min(abs(yval) / 0.02, 1)) * "
+                            f"max(min(({info['direction']} * coord) / {info['max_value']}, 1), 0)"
+                        )
+                    else:
+                        driver.expression = (
+                            f"(1 - oval * 0.6) * "
+                            f"max(min(({info['direction']} * coord) / {info['max_value']}, 1), 0)"
+                        )
+
+                o_shape = CharacterMesh.data.shape_keys.key_blocks.get("O")
+                if o_shape:
+                    driver = o_shape.driver_add('value').driver
+                    driver.type = 'SCRIPTED'
+
+                    for axis in ["x", "y", "z"]:
+                        var = driver.variables.new()
+                        var.name = f"s_{axis}"
+                        var.targets[0].id = armature_obj
+                        var.targets[0].data_path = f'pose.bones["Mouth"].scale.{axis}'
+
+                    driver.expression = (
+                        "max(min(((abs(s_x) + abs(s_y) + abs(s_z)) / 3 - 1) / 0.5, 1), 0)"
+                    )
+
+            shape_map = {
+                "M_OpenSmall": "M_OpenSmall",
+                "M_Laugh": "M_Laugh",
+                "M_Scared": "M_Scared",
+                "M_ScaredTooth": "M_ScaredTooth",
+                "M_Anger": "M_Anger",
+                "M_Trapezoid": "M_Trapezoid",
+                "M_Nutcracker": "M_Nutcracker",
+                "Aa": "Aa",
+                "M_A": "M_A",
+                "M_O": "M_O",
+            }
+
+            for bone_name, shape_name in shape_map.items():
+                shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                    shape_name)
+                if not shape_key:
+                    continue
+
+                driver = shape_key.driver_add('value').driver
+                driver.type = 'SCRIPTED'
+
+                var = driver.variables.new()
+                var.name = 'yval'
+                var.targets[0].id = armature_obj
+                var.targets[0].data_path = f'pose.bones["{bone_name}"].location.y'
+
+                driver.expression = "max(min(yval / 0.02, 1), 0)"
+
+            bone_name = "Eyebrows"
+
+            y_mappings = {
+                "B_Up_Add": {"direction": 1, "shape_key": "B_Up_Add"},
+                "B_Down_Add": {"direction": -1, "shape_key": "B_Down_Add"},
+            }
+
+            for key, data in y_mappings.items():
+                shape_key = CharacterMesh.data.shape_keys.key_blocks.get(
+                    data["shape_key"])
+                if not shape_key:
+                    continue
+
+                driver = shape_key.driver_add('value').driver
+                driver.type = 'SCRIPTED'
+
+                var = driver.variables.new()
+                var.name = 'yval'
+                var.targets[0].id = armature_obj
+                var.targets[0].data_path = f'pose.bones["{bone_name}"].location.y'
+
+                dir = data["direction"]
+                driver.expression = f"max(min(({dir} * yval) / 0.01, 1), 0)"
+
+            z_mappings = {
+                "B_AH_L": {"direction": -1, "angle_deg": 10},
+                "B_AH_R": {"direction": 1, "angle_deg": 10}
+            }
+
+            for key, info in z_mappings.items():
+                shape_key = CharacterMesh.data.shape_keys.key_blocks.get(key)
+                if not shape_key:
+                    continue
+
+                driver = shape_key.driver_add('value').driver
+                driver.type = 'SCRIPTED'
+
+                var = driver.variables.new()
+                var.name = 'zrot'
+                var.targets[0].id = armature_obj
+                var.targets[0].data_path = f'pose.bones["{bone_name}"].rotation_euler.z'
+
+                max_radians = math.radians(info["angle_deg"])
+                direction = info["direction"]
+
+                driver.expression = f"max(min(({direction} * zrot) / {max_radians:.5f}, 1), 0)"
+
+            bpy.ops.object.mode_set(mode='POSE')
+
+            if 'FacePanel' not in armature_obj.data.collections:
+                new_collection = armature_obj.data.collections.new(
+                    name='FacePanel')
+
+            theme_bones = {
+                "THEME01": [
+                    "MouthPanel", "Mouth", "Eyebrows",
+                    "B_Anger", "B_Happy", "B_Cheerful", "B_Sad", "B_Flat", "B_Inside_Add"
+                ],
+                "THEME09": [
+                    "EyeScale", "Eye.L", "Eye.R",
+                    "Smile.L", "Anger.L", "Sad.L", "Focus.L", "Insipid.L",
+                    "Smile.R", "Anger.R", "Sad.R", "Focus.R", "Insipid.R"
+                ],
+                "THEME03": [
+                    "Mouth.R", "Mouth.L", "M_OpenSmall", "M_Laugh",
+                    "M_Scared", "M_ScaredTooth", "M_Anger", "M_Trapezoid", "M_Nutcracker", "Aa", "M_A", "M_O"
+                ],
+            }
+
+            exclude_from_facepanel = {"Eye.L", "Eye.R"}
+
+            for theme_name, bone_names in theme_bones.items():
+                for bone_name in bone_names:
+                    pbone = armature_obj.pose.bones.get(bone_name)
+                    if pbone:
+                        pbone.color.palette = theme_name
+                        if bone_name not in exclude_from_facepanel:
+                            pbone.bone.select = True
+
+            facepanel_index = armature_obj.data.collections.find('FacePanel')
+            bpy.ops.armature.move_to_collection(
+                collection_index=facepanel_index)
+            bpy.ops.pose.select_all(action='DESELECT')
+
+            for bone_name in ["FacePanel", "FacePanelRoot"]:
+                pbone = armature_obj.pose.bones.get(bone_name)
+                if pbone:
+                    pbone.bone.select = True
+
+            others_index = armature_obj.data.collections.find('Others')
+            bpy.ops.armature.move_to_collection(collection_index=others_index)
+            bpy.ops.pose.select_all(action='DESELECT')
+
+            bone = armature_obj.data.bones.get("MouthPanel")
+            if bone:
+                bone.hide_select = True
+
+            bpy.context.object.data.collections_all["FacePanel"].is_visible = True
+
+            mesh_names_to_delete = [
+                "CustomTriangle",
+                "CustomSquare",
+                "CustomDiamond",
+                "CustomCross"
+            ]
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+
+            view_layer = bpy.context.view_layer
+            collection = bpy.context.scene.collection
+
+            for name in mesh_names_to_delete:
+                obj = bpy.data.objects.get(name)
+                if obj and obj.type == 'MESH':
+                    if obj.name not in view_layer.objects:
+                        collection.objects.link(obj)
+
+                    obj.select_set(True)
+                    view_layer.objects.active = obj
+                    bpy.ops.object.delete()
+
+            armature_obj['face_panel_created'] = True
+            self.report({'INFO'}, "Face panel created successfully.")
+
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in initial_selected_objects:
+                obj.select_set(True)
+            context.view_layer.objects.active = initial_active_object
+
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to create face panel: {str(e)}")
+            return {'CANCELLED'}
 
 
 class WW_OT_ImportFacePanel(Operator, ImportHelper):
@@ -3737,6 +4970,7 @@ class VIEW3D_PT_WutheringWaves(Panel):
         col.operator("shader.import_shader", icon="IMPORT")
         col.operator("shader.rigify_armature", icon="BONE_DATA")
         col.operator("shader.setup_head_driver", icon="DRIVER")
+        col.operator("shader.create_face_panel", icon="FACESEL")
         col.operator("shader.import_face_panel", icon="FACESEL")
 
         box = layout.box()
@@ -3917,6 +5151,7 @@ classes = [
     WW_OT_ImportTextures,
     WW_OT_SetupHeadDriver,
     WW_OT_Rigify,
+    WW_OT_CreateFacePanel,
     WW_OT_ImportFacePanel,
     WW_OT_SetLightMode,
     WW_OT_ToggleTexMode,
