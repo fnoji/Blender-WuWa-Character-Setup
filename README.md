@@ -1,3 +1,6 @@
+
+<img width="1913" height="1000" alt="スクリーンショット 2025-12-08 001448" src="https://github.com/user-attachments/assets/4c202b14-4e40-4988-9e35-5ed10831c15d" />
+
 [ 🇯🇵 **日本語** ](README_JA.md)
 
 # WuWa Character Setup for Blender
@@ -5,7 +8,7 @@
 **WuWa Character Setup** is a Blender addon designed to easily configure model and shader settings.
 It automates the entire process of importing Wuthering Waves character UEmodels into Blender, setting up shading, and rigging. It provides automatic shading setup, rigging with Rigify, and facial expression control setups.
 
-This addon was developed by user Akatsuki on Discord. Since I joined as a maintainer, we are publishing it on GitHub starting from the initial version.
+This addon was developed by user Akatsuki on Discord. Since I joined as a maintainer from version 1.4, we are publishing it on GitHub starting from the initial version.
 The shader used is the [shader optimized for Wuthering Waves models](https://discord.com/channels/894925535870865498/1213552094678614038/1272958039221338114) created by JaredNyts.
 The original scripts for the rig and face rig were [created by Scheinze](https://discord.com/channels/894925535870865498/1320434868806615122/1320434868806615122), and I have optimized them from the final version.
 The references used for the face panel were [created by Micchi](https://discord.com/channels/894925535870865498/1216442545782132746/1216442545782132746).

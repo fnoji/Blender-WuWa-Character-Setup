@@ -53,7 +53,7 @@ bl_info = {
     "name": "WuWa Character Setup",
     "author": "Akatsuki, fnoji",
     "version": (1, 4),
-    "blender": (4, 1, 1),
+    "blender": (4, 1, 0),
     "location": "View3D > UI > Wuthering Waves",
     "description": "Import & Setup Wuthering Waves characters",
     "support": "COMMUNITY",
