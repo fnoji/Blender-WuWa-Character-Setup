@@ -1,0 +1,12 @@
+schema_version = "1.0.0"
+id = "wuwa_character_setup"
+version = "1.4.0"
+name = "WuWa Character Setup"
+tagline = "Import & Setup Wuthering Waves characters"
+maintainer = "Akatsuki, fnoji"
+type = "add-on"
+website = "https://github.com/fnoji/Blender-WuWa-Character-Setup"
+permissions = ["files"]
+platforms = ["windows-x64", "macos-arm64", "linux-x64"]
+blender_version_min = "4.1.0"
+license = ["GNU General Public License v3.0 or later"]
