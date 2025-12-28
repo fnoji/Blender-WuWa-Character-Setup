@@ -32,7 +32,7 @@ The references used for the face panel were [created by Micchi](https://discord.
 ## Requirements
 
 - **Blender**: Version 4.1 or later (Note: The shader itself requires Goo Engine).
-- **Dependencies**: [UEFormat](https://github.com/Start5132/Blender-UEFormat) (Required for importing `.uemodel` files).
+- **Dependencies**: [UEFormat](https://github.com/h4lfheart/UEFormat) (Required for importing `.uemodel` files).
 
 ## Installation
 
@@ -63,7 +63,7 @@ You can adjust the character's appearance using settings in the panel:
 ## Credits
 
 - **Authors**: Akatsuki, fnoji
-- **Version**: 1.4.0
+- **Version**: 1.4.1
 
 ## Notes
 

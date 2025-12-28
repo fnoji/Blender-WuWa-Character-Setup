@@ -472,12 +472,27 @@ class WW_OT_Rigify(Operator):
                 "Bip001Neck": "neck", "Bip001Head": "head", "Bip001Clavicle": "shoulder",
                 "Bip001UpperArm": "upper_arm", "Bip001Forearm": "forearm", "Bip001Hand": "hand",
                 "Bip001Thigh": "thigh", "Bip001Calf": "shin", "Bip001Foot": "foot", "Bip001Toe0": "toe_ik",
+                "Bip001Spine": "Spine", "Bip001Spine1": "Spine1", "Bip001Spine2": "Spine2", "Bip001Pelvis": "Pelvis",
                 "Bip001Finger0": "thumb.01", "Bip001Finger01": "thumb.02", "Bip001Finger02": "thumb.03",
-                "Bip001Finger1": "f_index.01", "Bip001Finger11": "f_index.02", "Bip001Finger12": "f_index.03",
-                "Bip001Finger2": "f_middle.01", "Bip001Finger21": "f_middle.02", "Bip001Finger22": "f_middle.03",
-                "Bip001Finger3": "f_ring.01", "Bip001Finger31": "f_ring.02", "Bip001Finger32": "f_ring.03",
-                "Bip001Finger4": "f_pinky.01", "Bip001Finger41": "f_pinky.02", "Bip001Finger42": "f_pinky.03",
             }
+            
+            # Add finger mappings based on whether Finger13 exists
+            # For models WITH Finger13: Finger11→01, Finger12→02, Finger13→03
+            # For models WITHOUT Finger13: Finger1→01, Finger11→02, Finger12→03
+            if finger13_exists_left or finger13_exists_right:
+                name_mapping.update({
+                    "Bip001Finger11": "f_index.01", "Bip001Finger12": "f_index.02", "Bip001Finger13": "f_index.03",
+                    "Bip001Finger21": "f_middle.01", "Bip001Finger22": "f_middle.02", "Bip001Finger23": "f_middle.03",
+                    "Bip001Finger31": "f_ring.01", "Bip001Finger32": "f_ring.02", "Bip001Finger33": "f_ring.03",
+                    "Bip001Finger41": "f_pinky.01", "Bip001Finger42": "f_pinky.02", "Bip001Finger43": "f_pinky.03",
+                })
+            else:
+                name_mapping.update({
+                    "Bip001Finger1": "f_index.01", "Bip001Finger11": "f_index.02", "Bip001Finger12": "f_index.03",
+                    "Bip001Finger2": "f_middle.01", "Bip001Finger21": "f_middle.02", "Bip001Finger22": "f_middle.03",
+                    "Bip001Finger3": "f_ring.01", "Bip001Finger31": "f_ring.02", "Bip001Finger32": "f_ring.03",
+                    "Bip001Finger4": "f_pinky.01", "Bip001Finger41": "f_pinky.02", "Bip001Finger42": "f_pinky.03",
+                })
             
             final_renames = {}
             current_bones = list(armature.data.edit_bones)
@@ -872,8 +887,8 @@ class WW_OT_Rigify(Operator):
                  bpy.ops.object.mode_set(mode='POSE')
                  bones_to_move = {
                     0: ["torso", "chest", "shoulder.L", "shoulder.R", "hips", "neck", "head"],
-                    1: ["Bip001Spine_fk", "Bip001Spine1_fk", "Bip001Spine2_fk", "tweak_Bip001Spine1",
-                        "tweak_Bip001Spine2", "tweak_Bip001Spine2.001", "tweak_Bip001Spine", "tweak_Bip001Pelvis", "Bip001Pelvis_fk", "tweak_neck"],
+                    1: ["Spine_fk", "Spine1_fk", "Spine2_fk", "tweak_Spine1",
+                        "tweak_Spine2", "tweak_Spine2.001", "tweak_Spine", "tweak_Pelvis", "Pelvis_fk", "tweak_neck"],
                     2: ["thumb.01_master.L", "f_index.01_master.L", "f_middle.01_master.L", "f_ring.01_master.L", "f_pinky.01_master.L",
                         "thumb.01_master.R", "f_index.01_master.R", "f_middle.01_master.R", "f_ring.01_master.R", "f_pinky.01_master.R",
                         "f_index.02_master.L", "f_middle.02_master.L", "f_middle.02_master.L", "f_ring.02_master.L", "f_pinky.02_master.L",
@@ -886,16 +901,16 @@ class WW_OT_Rigify(Operator):
                         "f_pinky.01.R", "f_pinky.02.R", "f_pinky.03.R", "f_pinky.01.R.001", "thumb.01.R",
                         "Bip001Finger13.L", "f_index.02.L.001", "Bip001Finger23.L", "f_middle.02.L.001", "Bip001Finger33.L", "f_ring.02.L.001", "Bip001Finger43.L", "f_pinky.02.L.001",
                         "Bip001Finger13.R", "f_index.02.R.001", "Bip001Finger23.R", "f_middle.02.R.001", "Bip001Finger33.R", "f_ring.02.R.001", "Bip001Finger43.R", "f_pinky.02.R.001"],
-                    4: ["upper_arm_parent.L", "upper_arm_ik.L", "hand_ik.L"],
-                    5: ["upper_arm_parent.R", "upper_arm_ik.R", "hand_ik.R"],
+                    4: ["upper_arm_parent.L", "upper_arm_ik.L", "hand_ik.L", "upper_arm_ik_target.L"],
+                    5: ["upper_arm_parent.R", "upper_arm_ik.R", "hand_ik.R", "upper_arm_ik_target.R"],
                     6: ["upper_arm_fk.L", "forearm_fk.L", "hand_fk.L"],
                     7: ["upper_arm_fk.R", "forearm_fk.R", "hand_fk.R"],
                     8: ["upper_arm_tweak.L", "upper_arm_tweak.L.001", "forearm_tweak.L", "forearm_tweak.L.001", "hand_tweak.L"],
                     9: ["upper_arm_tweak.R", "upper_arm_tweak.R.001", "forearm_tweak.R", "forearm_tweak.R.001", "hand_tweak.R"],
-                    10: ["thigh_parent.L", "thigh_ik.L", "foot_heel_ik.L", "foot_spin_ik.L", "toe_ik.L", "foot_ik.L"],
-                    11: ["thigh_parent.R", "thigh_ik.R", "foot_heel_ik.R", "foot_spin_ik.R", "toe_ik.R", "foot_ik.R"],
-                    12: ["thigh_fk.L", "shin_fk.L", "foot_fk.L"],
-                    13: ["thigh_fk.R", "shin_fk.R", "foot_fk.R"],
+                    10: ["thigh_parent.L", "thigh_ik.L", "foot_heel_ik.L", "foot_spin_ik.L", "toe_ik.L", "foot_ik.L", "thigh_ik_target.L"],
+                    11: ["thigh_parent.R", "thigh_ik.R", "foot_heel_ik.R", "foot_spin_ik.R", "toe_ik.R", "foot_ik.R", "thigh_ik_target.R"],
+                    12: ["thigh_fk.L", "shin_fk.L", "foot_fk.L", "toe_fk.L"],
+                    13: ["thigh_fk.R", "shin_fk.R", "foot_fk.R", "toe_fk.R"],
                     14: ["thigh_tweak.L", "thigh_tweak.L.001", "shin_tweak.L", "shin_tweak.L.001", "foot_tweak.L"],
                     15: ["thigh_tweak.R", "thigh_tweak.R.001", "shin_tweak.R", "shin_tweak.R.001", "foot_tweak.R"],
                  }
@@ -960,11 +975,29 @@ class WW_OT_Rigify(Operator):
                      if cname in cols_all: cols_all[cname].is_visible = False
                  if "Root" in cols_all: cols_all["Root"].is_visible = True
                  
-                 # IK Pole
+                 # IK Pole - set property and move to IK collections
                  ik_pole_targets = ["upper_arm_parent.L", "upper_arm_parent.R", "thigh_parent.L", "thigh_parent.R"]
                  for b_name in ik_pole_targets:
                      bone = RigArmatureObj.pose.bones.get(b_name)
                      if bone and "pole_vector" in bone: bone["pole_vector"] = True
+                 
+                 # Move IK pole bones to IK collections
+                 pole_collection_map = {
+                     "upper_arm_ik_target.L": 4,  # Arm.L (IK)
+                     "upper_arm_ik_target.R": 5,  # Arm.R (IK)
+                     "thigh_ik_target.L": 10,     # Leg.L (IK)
+                     "thigh_ik_target.R": 11,     # Leg.R (IK)
+                     "VIS_upper_arm_ik_pole.L": 4,  # Arm.L (IK)
+                     "VIS_upper_arm_ik_pole.R": 5,  # Arm.R (IK)
+                     "VIS_thigh_ik_pole.L": 10,     # Leg.L (IK)
+                     "VIS_thigh_ik_pole.R": 11,     # Leg.R (IK)
+                 }
+                 for pole_name, col_idx in pole_collection_map.items():
+                     bpy.ops.pose.select_all(action='DESELECT')
+                     pole_bone = RigArmatureObj.pose.bones.get(pole_name)
+                     if pole_bone:
+                         pole_bone.bone.select = True
+                         bpy.ops.armature.move_to_collection(collection_index=col_idx)
                  
                  # Theme Assignments
                  theme_assignments = {"EyeTracker": "THEME01", "Eye.L": "THEME09", "Eye.R": "THEME09"}
@@ -972,6 +1005,41 @@ class WW_OT_Rigify(Operator):
                      bone = RigArmatureObj.pose.bones.get(b_name)
                      if bone: bone.color.palette = theme
                  
+                 # Create FK toe bones (toe_fk.L/R) from ORG-toe_ik bones
+                 bpy.ops.object.mode_set(mode='EDIT')
+                 arm = RigArmatureObj.data
+                 for side in ['.L', '.R']:
+                     org_toe = arm.edit_bones.get(f'ORG-toe_ik{side}')
+                     foot_fk = arm.edit_bones.get(f'foot_fk{side}')
+                     if org_toe and foot_fk:
+                         new_bone = arm.edit_bones.new(f'toe_fk{side}')
+                         new_bone.head = org_toe.head.copy()
+                         new_bone.tail = org_toe.tail.copy()
+                         new_bone.roll = org_toe.roll
+                         new_bone.parent = foot_fk
+                         new_bone.use_connect = True
+                 bpy.ops.object.mode_set(mode='POSE')
+                 
+                 # Assign custom shape for FK toe bones
+                 foot_fk_l = RigArmatureObj.pose.bones.get('foot_fk.L')
+                 for side in ['.L', '.R']:
+                     toe_fk = RigArmatureObj.pose.bones.get(f'toe_fk{side}')
+                     if toe_fk and foot_fk_l:
+                         toe_fk.custom_shape = foot_fk_l.custom_shape
+                         toe_fk.color.palette = 'THEME03'
+                 
+                 # Move toe_fk bones to FK leg collections
+                 bpy.ops.pose.select_all(action='DESELECT')
+                 toe_fk_l = RigArmatureObj.pose.bones.get('toe_fk.L')
+                 if toe_fk_l:
+                     toe_fk_l.bone.select = True
+                     bpy.ops.armature.move_to_collection(collection_index=12)
+                 bpy.ops.pose.select_all(action='DESELECT')
+                 toe_fk_r = RigArmatureObj.pose.bones.get('toe_fk.R')
+                 if toe_fk_r:
+                     toe_fk_r.bone.select = True
+                     bpy.ops.armature.move_to_collection(collection_index=13)
+
                  # Neck Tweak
                  bpy.ops.object.mode_set(mode='EDIT')
                  arm = RigArmatureObj.data
@@ -1001,7 +1069,7 @@ class WW_OT_Rigify(Operator):
                      head_bone.use_connect = False; head_bone.parent = new_bone
                  
                  bpy.ops.object.mode_set(mode='POSE')
-                 spine2_fk = RigArmatureObj.pose.bones.get("Bip001Spine2_fk")
+                 spine2_fk = RigArmatureObj.pose.bones.get("Spine2_fk")
                  if "Bip001Neck._fk" in RigArmatureObj.pose.bones:
                      tb = RigArmatureObj.pose.bones["Bip001Neck._fk"]
                      if spine2_fk: tb.custom_shape = spine2_fk.custom_shape
@@ -1019,6 +1087,47 @@ class WW_OT_Rigify(Operator):
                          pb = RigArmatureObj.pose.bones.get(b)
                          if pb: pb.bone.select = True
                      bpy.ops.armature.move_to_collection(collection_index=cidx)
+                 
+                 # Setup toe FK/IK switching
+                 # toe_fk works in FK mode (IK_FK = 1), toe_ik works in IK mode (IK_FK = 0)
+                 for side in ['.L', '.R']:
+                     toe_fk_bone = RigArmatureObj.pose.bones.get(f'toe_fk{side}')
+                     org_toe = RigArmatureObj.pose.bones.get(f'ORG-toe_ik{side}')
+                     toe_ik_bone = RigArmatureObj.pose.bones.get(f'toe_ik{side}')
+                     thigh_parent = RigArmatureObj.pose.bones.get(f'thigh_parent{side}')
+                     
+                     if toe_fk_bone and org_toe and thigh_parent and toe_ik_bone:
+                         # Check for existing toe_ik copy constraint and add IK_FK driver
+                         for con in org_toe.constraints:
+                             if con.type == 'COPY_TRANSFORMS' and con.subtarget == f'toe_ik{side}':
+                                 # Add driver for IK influence (1 - IK_FK)
+                                 ik_driver = con.driver_add('influence').driver
+                                 ik_driver.type = 'SCRIPTED'
+                                 ik_var = ik_driver.variables.new()
+                                 ik_var.name = 'ik_fk'
+                                 ik_var.type = 'SINGLE_PROP'
+                                 ik_var.targets[0].id = RigArmatureObj
+                                 ik_var.targets[0].data_path = f'pose.bones["thigh_parent{side}"]["IK_FK"]'
+                                 ik_driver.expression = '1 - ik_fk'
+                                 break
+                         
+                         # Add copy rotation constraint to ORG-toe_ik from toe_fk for FK mode
+                         fk_constraint = org_toe.constraints.new('COPY_ROTATION')
+                         fk_constraint.name = 'Copy Rotation FK'
+                         fk_constraint.target = RigArmatureObj
+                         fk_constraint.subtarget = f'toe_fk{side}'
+                         fk_constraint.target_space = 'LOCAL'
+                         fk_constraint.owner_space = 'LOCAL'
+                         
+                         # Add driver for FK influence (equals IK_FK value - 1=FK mode, 0=IK mode)
+                         driver = fk_constraint.driver_add('influence').driver
+                         driver.type = 'SCRIPTED'
+                         var = driver.variables.new()
+                         var.name = 'ik_fk'
+                         var.type = 'SINGLE_PROP'
+                         var.targets[0].id = RigArmatureObj
+                         var.targets[0].data_path = f'pose.bones["thigh_parent{side}"]["IK_FK"]'
+                         driver.expression = 'ik_fk'
                  
                  # Bone Limit
                  bpy.ops.object.mode_set(mode='EDIT')

@@ -31,7 +31,7 @@
 ## 動作環境
 
 - **Blender**: バージョン 4.1 以降 (注意 : シェーダー自体がGoo Engineを必要としています。)
-- **依存アドオン**: [UEFormat](https://github.com/Start5132/Blender-UEFormat) (`.uemodel` ファイルのインポートに必要)
+- **依存アドオン**: [UEFormat](https://github.com/h4lfheart/UEFormat) (`.uemodel` ファイルのインポートに必要)
 
 ## インストール方法
 
@@ -62,7 +62,7 @@
 ## クレジット
 
 - **作成者**: Akatsuki, fnoji
-- **バージョン**: 1.4.0
+- **バージョン**: 1.4.1
 
 ## 備考
 

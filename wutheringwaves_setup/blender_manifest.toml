@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "wuwa_character_setup"
-version = "1.4.0"
+version = "1.4.1"
 name = "WuWa Character Setup"
 tagline = "Import & Setup Wuthering Waves characters"
 maintainer = "Akatsuki, fnoji"
