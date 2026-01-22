@@ -52,7 +52,7 @@ from .run_entire_setup import WW_OT_RunEntireSetup
 bl_info = {
     "name": "WuWa Character Setup",
     "author": "Akatsuki, fnoji",
-    "version": (1, 4, 1),
+    "version": (1, 4, 2),
     "blender": (4, 1, 0),
     "location": "View3D > UI > Wuthering Waves",
     "description": "Import & Setup Wuthering Waves characters",
