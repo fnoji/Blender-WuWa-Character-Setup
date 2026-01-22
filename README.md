@@ -63,7 +63,6 @@ You can adjust the character's appearance using settings in the panel:
 ## Credits
 
 - **Authors**: Akatsuki, fnoji
-- **Version**: 1.4.1
 
 ## Notes
 
