@@ -14,8 +14,12 @@ from mathutils import Vector
 
 from .utils import get_armature_from_modifiers, logger
 
-preserved_shape_keys = {"Pupil_Up", "Pupil_Down",
-                        "Pupil_R", "Pupil_L", "Pupil_Scale"}
+preserved_shape_keys = {
+    "Pupil_Up", "Pupil_Down", "Pupil_R", "Pupil_L", "Pupil_Scale",
+    # Per-eye variants
+    "Pupil_Up.L", "Pupil_Up.R", "Pupil_Down.L", "Pupil_Down.R",
+    "Pupil_R.L", "Pupil_R.R", "Pupil_L.L", "Pupil_L.R"
+}
 
 
 def delete_shape_key_drivers(mesh, preserved_shape_keys):
@@ -501,6 +505,59 @@ class WW_OT_CreateFacePanel(bpy.types.Operator):
             max_radians = math.radians(info["angle_deg"])
             direction = info["direction"]
             driver.expression = f"max(min(({direction} * zrot) / {max_radians:.5f}, 1), 0)"
+
+        # Pupil movement drivers (recreate from rigify.py logic)
+        pupil_shape_key_names = {
+            "Pupil_L": "LOC_X", "Pupil_R": "LOC_X",
+            "Pupil_Up": "LOC_Y", "Pupil_Down": "LOC_Y"
+        }
+        pupil_expressions = {
+            "Pupil_L": 'max(min((bone_x * 10), 1), 0) if bone_x > 0 else 0',
+            "Pupil_R": 'max(min((-bone_x * 10), 1), 0) if bone_x < 0 else 0',
+            "Pupil_Up": 'max(min((bone_y * 10), 1), 0) if bone_y > 0 else 0',
+            "Pupil_Down": 'max(min((-bone_y * 10), 1), 0) if bone_y < 0 else 0'
+        }
+        
+        # Main EyeTracker drivers
+        if CharacterMesh.data.shape_keys and "EyeTracker" in armature_obj.pose.bones:
+            for shape_key_name, transform_axis in pupil_shape_key_names.items():
+                shape_key = CharacterMesh.data.shape_keys.key_blocks.get(shape_key_name)
+                if shape_key:
+                    # Remove existing driver if any
+                    shape_key.driver_remove('value')
+                    driver = shape_key.driver_add('value').driver
+                    driver.type = 'SCRIPTED'
+                    var = driver.variables.new()
+                    var.name = 'bone_' + transform_axis[-1].lower()
+                    var.type = 'TRANSFORMS'
+                    var.targets[0].id = armature_obj
+                    var.targets[0].bone_target = "EyeTracker"
+                    var.targets[0].transform_type = transform_axis
+                    var.targets[0].transform_space = 'LOCAL_SPACE'
+                    driver.expression = pupil_expressions[shape_key_name]
+        
+        # Per-eye drivers (Eye.L / Eye.R)
+        if CharacterMesh.data.shape_keys:
+            for bone_suffix in ['.L', '.R']:
+                bone_name = "Eye" + bone_suffix
+                if bone_name not in armature_obj.pose.bones:
+                    continue
+                for shape_key_prefix, transform_axis in pupil_shape_key_names.items():
+                    shape_key_name = shape_key_prefix + bone_suffix
+                    shape_key = CharacterMesh.data.shape_keys.key_blocks.get(shape_key_name)
+                    if shape_key:
+                        # Remove existing driver if any
+                        shape_key.driver_remove('value')
+                        driver = shape_key.driver_add('value').driver
+                        driver.type = 'SCRIPTED'
+                        var = driver.variables.new()
+                        var.name = 'bone_' + transform_axis[-1].lower()
+                        var.type = 'TRANSFORMS'
+                        var.targets[0].id = armature_obj
+                        var.targets[0].bone_target = bone_name
+                        var.targets[0].transform_type = transform_axis
+                        var.targets[0].transform_space = 'LOCAL_SPACE'
+                        driver.expression = pupil_expressions[shape_key_prefix]
 
     def execute(self, context):
         initial_active_object = context.active_object

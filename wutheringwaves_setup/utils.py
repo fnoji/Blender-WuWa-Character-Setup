@@ -231,7 +231,34 @@ def get_suffix():
 
 def make_texture_patterns(params: TextureSearchParameters):
     patterns = []
+    
+    # For Version mode (tex_mode=False), add alternative texture patterns first
+    # These patterns support: _Switch_D (e.g., Down_Switch_D) and Damage variants (e.g., DownDamage_D)
+    if not params.mode:  # Version mode
+        if params.original_name:
+            if match := re.search(r"MI_(.*)", params.original_name):
+                base = match.group(1)
+                base_no_ver = re.sub(r"[0-9_]+$", "", base)
+                
+                # Switch pattern: Down_D -> Down_Switch_D
+                switch_pat = f"T_{base_no_ver}_Switch{params.suffix}"
+                patterns.append(switch_pat)
+                
+                # Damage pattern: Down_D -> DownDamage_D
+                damage_pat = f"T_{base_no_ver}Damage{params.suffix}"
+                patterns.append(damage_pat)
+        else:
+            base_no_ver = re.sub(r"[0-9_]+$", "", params.base_part)
+            
+            # Switch pattern with regex
+            switch_pat = f"T_.*?{base_no_ver}_Switch{params.suffix}"
+            patterns.append(switch_pat)
+            
+            # Damage pattern with regex
+            damage_pat = f"T_.*?{base_no_ver}Damage{params.suffix}"
+            patterns.append(damage_pat)
 
+    # Original logic for base and version patterns
     if params.original_name:
         if match := re.search(r"MI_(.*)", params.original_name):
             base = match.group(1)

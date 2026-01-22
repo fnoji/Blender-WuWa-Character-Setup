@@ -110,6 +110,59 @@ def select_and_move_bones(armature, keyword, collection_index):
             
     return len(selected_bones)
 
+def get_hair_chain_length(bone):
+    """Get total length of the Hair bone chain this bone belongs to."""
+    # Find chain root (first Hair bone that has no Hair parent)
+    root = bone
+    while root.parent and "Hair" in root.parent.name:
+        root = root.parent
+    # Count from root to end following the chain
+    length = 1
+    current = root
+    while current.children:
+        hair_children = [c for c in current.children if "Hair" in c.name]
+        if not hair_children:
+            break
+        current = hair_children[0]
+        length += 1
+    return length
+
+def select_and_move_hair_bones(armature, hair1_index, hair2_index):
+    """Move Hair bones to Hair 1 or Hair 2 based on chain length (≤3 = Hair 1, ≥4 = Hair 2)."""
+    bpy.ops.pose.select_all(action='DESELECT')
+    
+    hair_bones = [bone for bone in armature.pose.bones if "Hair" in bone.name]
+    hair1_bones = []
+    hair2_bones = []
+    
+    for bone in hair_bones:
+        chain_length = get_hair_chain_length(bone.bone)
+        if chain_length >= 4:
+            hair2_bones.append(bone)
+        else:
+            hair1_bones.append(bone)
+        lock_bone_transformations(bone)
+    
+    # Move Hair 1 bones
+    if hair1_bones:
+        bpy.ops.pose.select_all(action='DESELECT')
+        for bone in hair1_bones:
+            bone.bone.select = True
+        try:
+            bpy.ops.armature.move_to_collection(collection_index=hair1_index)
+        except Exception as e:
+            print(f"Error moving Hair 1 bones: {e}")
+    
+    # Move Hair 2 bones
+    if hair2_bones:
+        bpy.ops.pose.select_all(action='DESELECT')
+        for bone in hair2_bones:
+            bone.bone.select = True
+        try:
+            bpy.ops.armature.move_to_collection(collection_index=hair2_index)
+        except Exception as e:
+            print(f"Error moving Hair 2 bones: {e}")
+
 def create_circle_widget(name, radius=0.1, location=(0, 0, 0)):
     if name in bpy.data.objects:
         return bpy.data.objects[name]
@@ -367,25 +420,31 @@ class WW_OT_Rigify(Operator):
                 ('Arm.L (IK)', 4, 5), ('Arm.R (IK)', 5, 5), ('Arm.L (FK)', 6, 6), ('Arm.R (FK)', 7, 6),
                 ('Arm.L (Tweak)', 8, 7), ('Arm.R (Tweak)', 9, 7), ('Leg.L (IK)', 10, 8), ('Leg.R (IK)', 11, 8),
                 ('Leg.L (FK)', 12, 9), ('Leg.R (FK)', 13, 9), ('Leg.L (Tweak)', 14, 10), ('Leg.R (Tweak)', 15, 10),
-                ('Hair', 16, 11), ('Cloth', 17, 11), ('Skirt', 18, 11), ('Tail', 19, 11), ('Root', 20, 12),     
+                ('Hair 1', 16, 11), ('Hair 2', 17, 11),
+                ('Cloth', 18, 12), ('Skirt', 19, 12),
+                ('Breast / Tail', 20, 13),
+                ('Root', 21, 14),     
             ]
             process_bone_collections_and_rigify(armature, bone_data)
             
             bpy.ops.armature.collection_add()
             armature.data.collections[-1].name = 'Others'
             
-            for row in [3, 6, 10, 14, 16]:
+            for row in [3, 6, 10, 14, 17]:
                 bpy.ops.armature.rigify_collection_add_ui_row(row=row, add=True)
 
             bpy.ops.object.mode_set(mode='POSE')
+            # Hair bones handled separately with chain length logic
+            select_and_move_hair_bones(armature, 16, 17)  # Hair 1 = 16, Hair 2 = 17
+            
             keywords_and_collections = [
-                ("Hair", 16), ("Earrings", 16),
-                ("Piao", 17),
-                ("Skirt", 18), ("Trousers", 18),
-                ("Tail", 19),
-                ("Other", 21), ("Weapon", 21), ("Prop", 21), ("Chibang", 21),
-                ("Bip001Neck.001", 22), ("Bip001Head.001", 22),
-                ("EyeTracker", 0), ("Chest", 0), ("Eye.L", 0), ("Eye.R", 0),
+                ("Earrings", 16),
+                ("Piao", 18),
+                ("Skirt", 19), ("Trousers", 19),
+                ("Tail", 20), ("Chest", 20),
+                ("Other", 22), ("Weapon", 22), ("Prop", 22), ("Chibang", 22),
+                ("Bip001Neck.001", 23), ("Bip001Head.001", 23),
+                ("EyeTracker", 0), ("Eye.L", 0), ("Eye.R", 0),
             ]
             for keyword, collection_index in keywords_and_collections:
                 select_and_move_bones(armature, keyword, collection_index)
@@ -396,7 +455,7 @@ class WW_OT_Rigify(Operator):
             collections_to_hide = [
                 "Torso (Tweak)", "Arm.L (FK)", "Arm.R (FK)", "Leg.L (FK)", "Leg.R (FK)",
                 "Arm.L (Tweak)", "Arm.R (Tweak)", "Leg.L (Tweak)", "Leg.R (Tweak)",
-                "Hair", "Cloth", "Skirt", "Tail"
+                "Hair 1", "Hair 2", "Cloth", "Skirt", "Breast / Tail"
             ]
             for col_name in collections_to_hide:
                 if col_name in armature.data.collections_all:
@@ -938,15 +997,18 @@ class WW_OT_Rigify(Operator):
                      RigArmatureObj.data.collections_all["ORG"].is_visible = True
                  
                  bpy.ops.object.mode_set(mode='POSE')
-                 # Helper loop for keywords and collections already extracted above, doing it again here as per script flow
+                 # Helper loop for keywords and collections - updated for new layer structure
+                 # Hair bones handled separately
+                 select_and_move_hair_bones(RigArmatureObj, 16, 17)  # Hair 1 = 16, Hair 2 = 17
+                 
                  keywords_and_collections = [
-                    ("Hair", 16), ("Earrings", 16), ("Piao", 17), ("Skirt", 18), ("Trousers", 18),
-                    ("Tail", 19), ("Other", 21), ("Weapon", 21), ("Prop", 21), ("Chibang", 21),
-                    ("EyeTracker", 0), ("neck.001", 21), ("head.001", 21), ("Chest", 0),
-                    ("Eye.L", 0), ("Eye.R", 0), ("Bone_Chest001", 19), ("Bone_Chest002", 19),
-   ("Bone_Chest003", 19),
-   ("L_ChestBone01", 19), ("L_ChestBone02", 19),
-   ("R_ChestBone01", 19), ("R_ChestBone02", 19),
+                    ("Earrings", 16), ("Piao", 18), ("Skirt", 19), ("Trousers", 19),
+                    ("Tail", 20), ("Other", 22), ("Weapon", 22), ("Prop", 22), ("Chibang", 22),
+                    ("EyeTracker", 0), ("neck.001", 22), ("head.001", 22), ("Chest", 20),
+                    ("Eye.L", 0), ("Eye.R", 0), ("Bone_Chest001", 20), ("Bone_Chest002", 20),
+                    ("Bone_Chest003", 20),
+                    ("L_ChestBone01", 20), ("L_ChestBone02", 20),
+                    ("R_ChestBone01", 20), ("R_ChestBone02", 20),
                  ]
                  for keyword, collection_index in keywords_and_collections:
                      select_and_move_bones(RigArmatureObj, keyword, collection_index)
@@ -965,13 +1027,13 @@ class WW_OT_Rigify(Operator):
                                  bone.bone.select = True
                                  lock_bone_transformations(bone)
                  if bones_piao_move:
-                     bpy.ops.armature.move_to_collection(collection_index=18)
+                     bpy.ops.armature.move_to_collection(collection_index=19)  # Skirt = 19
                  
                  # Visibility
                  cols_all = RigArmatureObj.data.collections_all
                  if "ORG" in cols_all: cols_all["ORG"].is_visible = False
                  for cname in ["Torso (Tweak)", "Fingers (Details)", "Arm.L (FK)", "Arm.R (FK)", "Arm.L (Tweak)", "Arm.R (Tweak)",
-                               "Leg.L (FK)", "Leg.R (FK)", "Leg.L (Tweak)", "Leg.R (Tweak)", "Hair", "Cloth", "Skirt", "Tail"]:
+                               "Leg.L (FK)", "Leg.R (FK)", "Leg.L (Tweak)", "Leg.R (Tweak)", "Hair 1", "Hair 2", "Cloth", "Skirt", "Breast / Tail"]:
                      if cname in cols_all: cols_all[cname].is_visible = False
                  if "Root" in cols_all: cols_all["Root"].is_visible = True
                  
