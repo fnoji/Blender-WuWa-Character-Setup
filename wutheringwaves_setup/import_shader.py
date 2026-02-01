@@ -468,6 +468,11 @@ class WW_OT_ImportShader(Operator, ImportHelper):
 
                 new_material = self.duplicate_material(
                     target_shader, mesh_name)
+                
+                # Lock original material
+                # slot.material.use_fake_user = True
+                # self.setup_original_material(context, slot.material)
+                
                 slot.material = new_material
                 set_star_shader(new_material, mat_name, stars)
                 processed_count += 1
@@ -477,6 +482,42 @@ class WW_OT_ImportShader(Operator, ImportHelper):
                 logger.error(f"Error processing material {mat_name}: {str(e)}")
 
         logger.info(f"Processed {processed_count} materials")
+
+    def setup_original_material(self, context, material: bpy.types.Material):
+        """Ensure original material has a simple texture setup for Animate Mode"""
+        if not material.use_nodes:
+            material.use_nodes = True
+        
+        target_node = None
+        output_node = None
+        
+        # 1. Try to find existing connected Image Texture
+        if material.node_tree:
+            for node in material.node_tree.nodes:
+                if node.type == 'OUTPUT_MATERIAL':
+                    output_node = node
+                    if node.inputs['Surface'].is_linked:
+                        link = node.inputs['Surface'].links[0]
+                        if link.from_node.type == 'TEX_IMAGE':
+                            target_node = link.from_node
+                            break
+        
+        # 2. If found, ensure it is named correctly for apply_textures
+        if target_node:
+            logger.info(f"Normalizing existing node in {material.name} to 'Base Color'")
+            target_node.name = "Base Color"
+            target_node.label = "Base Color"
+        else:
+            # 3. If not found (or complex setup), rebuild simplest graph
+            logger.info(f"Rebuilding simple graph for {material.name}")
+            material.node_tree.nodes.clear()
+            output_node = material.node_tree.nodes.new(type='ShaderNodeOutputMaterial')
+            output_node.location = (300, 0)
+            target_node = material.node_tree.nodes.new(type='ShaderNodeTexImage')
+            target_node.location = (0, 0)
+            target_node.name = "Base Color"
+            target_node.label = "Base Color"
+            material.node_tree.links.new(target_node.outputs['Color'], output_node.inputs['Surface'])
 
     def get_target_shader(
         self, mat_name: str, mat_map: Dict[str, str], stars: Dict[str, int]
@@ -506,6 +547,9 @@ class WW_OT_ImportShader(Operator, ImportHelper):
             material = bpy.data.materials["WW - Main"].copy()
 
         material.name = unique_name
+        # Lock character specific material
+        material.use_fake_user = True
+        
         if material.use_nodes:
             for node in material.node_tree.nodes:
                 if node.type == "TEX_IMAGE":
@@ -538,12 +582,44 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
         logger.info(f"Starting texture import for {mesh_name}")
 
         self.clear_existing_textures(context)
-
         self.import_textures(context)
-
-        data = get_mesh_data(context, mesh_name)
         self.assign_textures(context)
+        
+        return {"FINISHED"}
+    
+    def setup_original_material_helper(self, context, material: bpy.types.Material):
+        """Helper to ensure original material has a simple texture setup"""
+        if not material.use_nodes:
+            material.use_nodes = True
+        
+        target_node = None
+        
+        if material.node_tree:
+            for node in material.node_tree.nodes:
+                if node.type == 'OUTPUT_MATERIAL':
+                    if node.inputs['Surface'].is_linked:
+                        link = node.inputs['Surface'].links[0]
+                        if link.from_node.type == 'TEX_IMAGE':
+                            target_node = link.from_node
+                            break
+        
+        if target_node:
+            target_node.name = "Base Color"
+            target_node.label = "Base Color"
+        else:
+            material.node_tree.nodes.clear()
+            output_node = material.node_tree.nodes.new(type='ShaderNodeOutputMaterial')
+            output_node.location = (300, 0)
+            target_node = material.node_tree.nodes.new(type='ShaderNodeTexImage')
+            target_node.location = (0, 0)
+            target_node.name = "Base Color"
+            target_node.label = "Base Color"
+            material.node_tree.links.new(target_node.outputs['Color'], output_node.inputs['Surface'])
 
+    def assign_textures(self, context):
+        active_obj = context.active_object
+        mesh_name = active_obj.name.split(".")[0]
+        data = get_mesh_data(context, mesh_name)
         shadow_hair_count = 0
         for slot in active_obj.material_slots:
             if (
@@ -565,25 +641,42 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
 
         has_het_anywhere = False
         assigned_count = 0
+        has_het_anywhere = False
+        assigned_count = 0
         for slot in active_obj.material_slots:
-            if (
-                slot.material
-                and slot.material.use_nodes
-                and (
-                    match := re.search(
-                        r"WW - ([A-Za-z]+)(_?\d+|(?:_[^_]+)*)?", slot.material.name
-                    )
-                )
-            ):
+            if not slot.material or not slot.material.use_nodes:
+                continue
+
+            mat_name = slot.material.name
+            base = ""
+            version = ""
+            original_name = ""
+
+            # Check for WW materials
+            if match := re.search(r"WW - ([A-Za-z]+)(_?\d+|(?:_[^_]+)*)?", mat_name):
                 base, version = match.group(1), match.group(2) or ""
+                original_name = self.get_original_material_name(context, base, version)
+            
+            # Check for MI materials (Animate Mode)
+            elif mat_name.startswith("MI_"):
+                base, version = split_material_name(mat_name)
+                # For MI materials, the "original name" IS the material name
+                original_name = mat_name
+                # Ensure node setup exists
+                self.setup_original_material_helper(context, slot.material)
+
+            if base:
                 logger.info(
-                    f"Processing material: {slot.material.name} (base: {base}, version: {version})"
+                    f"Processing material: {mat_name} (base: {base}, version: {version})"
                 )
 
-                original_name = self.get_original_material_name(
-                    context, base, version)
-                logger.info(f"Original material name: {original_name}")
-
+                # For finding textures, we use the original name logic if possible, 
+                # or just the components.
+                # If we are in MI_ mode, extracting "original material name" via get_original_material_name is tricky 
+                # because that function expects WW naming conventions usually.
+                # But for MI_, we just want to load its textures.
+                
+                # Material Details wrapper
                 material_info = MaterialDetails(base, version, original_name)
                 mat_tex_data = MaterialTextureData(
                     slot.material,
@@ -598,8 +691,12 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
                 assigned_count += 1
                 logger.info(
                     f"Applied textures to material: {slot.material.name}")
+                
+                # Apply textures to Original Material (MI_) for Animate Mode logic REMOVED
+                # because new Animate Mode uses _Low generated from WW materials.
+                pass
 
-                if any(
+                if slot.material.use_nodes and any(
                     n.image and "_HET" in n.image.name
                     for n in slot.material.node_tree.nodes
                     if n.type == "TEX_IMAGE"
@@ -696,50 +793,24 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
         logger.info(f"Imported {len(imported_files)} textures for {mesh_name}")
         logger.info(f"Texture list: {data.textures}")
 
-    def assign_textures(self, context):
-        mesh_name = context.active_object.name.split(".")[0]
-        data = get_mesh_data(context, mesh_name)
-        logger.info(
-            f"Assigning textures to {mesh_name} with mode: {data.tex_mode}")
 
-        for slot in context.active_object.material_slots:
-            if (
-                slot.material
-                and slot.material.use_nodes
-                and (
-                    match := re.search(
-                        r"WW - ([A-Za-z]+)(_?\d+|(?:_[^_]+)*)?", slot.material.name
-                    )
-                )
-            ):
-                base, version = match.group(1), match.group(2) or ""
-                logger.info(
-                    f"Processing material: {slot.material.name} (base: {base}, version: {version})"
-                )
-
-                original_name = self.get_original_material_name(
-                    context, base, version)
-                logger.info(f"Original material name: {original_name}")
-
-                material_info = MaterialDetails(base, version, original_name)
-                mat_tex_data = MaterialTextureData(
-                    slot.material,
-                    material_info,
-                    TEXTURE_TYPE_MAPPINGS,
-                    self.files,
-                    self.directory,
-                    data.tex_mode,
-                )
-
-                apply_textures(mat_tex_data)
 
     def get_original_material_name(self, context, base: str, version: str):
-        return next(
-            (
-                slot.material.name
-                for slot in context.active_object.material_slots
-                if slot.material
-                and re.match(rf"MI_.*?{base}{version}$", slot.material.name)
-            ),
-            None,
-        )
+        """Find original MI_ material in bpy.data.materials (not slots, as slots may have WW materials)"""
+        # Extract character name from active object to match only relevant materials
+        mesh_name = context.active_object.name.split(".")[0]
+        char_name = extract_character_name(mesh_name)
+        
+        for mat in bpy.data.materials:
+            if not mat.name.startswith("MI_"):
+                continue
+            # Check if this material belongs to the same character
+            if char_name and char_name.lower() not in mat.name.lower():
+                continue
+            # Check if base part matches (case insensitive, handle Bangs/Bang variants)
+            mat_base, mat_version = split_material_name(mat.name)
+            if mat_base.lower() == base.lower() or \
+               (mat_base.lower() == "bang" and base.lower() == "bangs") or \
+               (mat_base.lower() == "bangs" and base.lower() == "bang"):
+                return mat.name
+        return None

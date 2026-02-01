@@ -310,7 +310,8 @@ class WW_OT_Rigify(Operator):
         # --------------- Main Rigify Code --------------- #
         selected_object = context.active_object
         OrigArmature = selected_object.name
-        RigArmature = extract_character_name(OrigArmature) + "Rig"
+        # User requested format: RIG-Name (e.g. RIG-Jinhsi)
+        RigArmature = "RIG-" + extract_character_name(OrigArmature)
         CharacterMesh = None
 
         for o in context.scene.objects:
@@ -623,6 +624,10 @@ class WW_OT_Rigify(Operator):
              RigArmatureObj = context.active_object
         
         if RigArmatureObj:
+             # Force rename to ensure it matches target naming convention
+             if RigArmatureObj.name != RigArmature:
+                 RigArmatureObj.name = RigArmature
+             
              context.view_layer.objects.active = RigArmatureObj
              
              # Adjust Neck/Head Custom Shapes

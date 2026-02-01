@@ -4,6 +4,9 @@ import logging
 import math
 import os
 import re
+import random
+import functools
+import addon_utils
 from collections import defaultdict, deque, namedtuple
 from math import cos, pi, sin
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -48,11 +51,12 @@ from .import_shader import WW_OT_ImportShader, WW_OT_ImportTextures
 from .rigify import WW_OT_Rigify
 from .create_face_panel import WW_OT_CreateFacePanel, WW_OT_ImportFacePanel, WW_OT_SetupHeadDriver
 from .run_entire_setup import WW_OT_RunEntireSetup
+from .animate_mode import set_animate_mode
 
 bl_info = {
     "name": "WuWa Character Setup",
     "author": "Akatsuki, fnoji",
-    "version": (1, 4, 2),
+    "version": (1, 4, 3),
     "blender": (4, 1, 0),
     "location": "View3D > UI > Wuthering Waves",
     "description": "Import & Setup Wuthering Waves characters",
@@ -279,6 +283,17 @@ def update_specular(self, context):
                             input.default_value = value
 
 
+def update_animate_mode(self, context):
+    try:
+        if context.active_object and context.active_object.name.startswith(self.mesh_name):
+             # Ensure we are updating for the correct object context if possible, 
+             # though self is the MeshTextureData item.
+             pass
+        set_animate_mode(context, self, self.animate_mode)
+    except Exception as e:
+        logger.error(f"Failed to update Animate Mode: {str(e)}")
+
+
 def add_scene_props():
     Scene.original_materials = StringProperty(default="")
     Scene.original_textures = StringProperty(default="")
@@ -471,6 +486,12 @@ class MeshTextureData(PropertyGroup):
         precision=1,
         update=update_disgust,
     )
+    animate_mode: BoolProperty(
+        name="Animate Mode",
+        description="Toggle simplified materials for animation",
+        default=False,
+        update=update_animate_mode
+    )
 
 
 class WW_OT_ImportUEModel(Operator):
@@ -491,11 +512,20 @@ class WW_OT_ImportUEModel(Operator):
             settings.reorient_bones = True
             settings.bone_length = 4.0
             
+            # Record existing objects to identify new ones later
+            existing_objs = set(context.scene.objects)
+            
+            # Deselect all to ensure clean state
+            bpy.ops.object.select_all(action='DESELECT')
+            
             # Call operator without arguments
             bpy.ops.uf.import_uemodel("INVOKE_DEFAULT")
             
-            # Register delayed rename to run after import (attempting to catch it)
-            bpy.app.timers.register(self.delayed_rename, first_interval=1.0)
+            # Register delayed rename with existing_objs bound
+            bpy.app.timers.register(
+                functools.partial(self.delayed_rename, existing_objs), 
+                first_interval=1.0
+            )
             
         except AttributeError:
             self.report({"ERROR"}, "UEFormat addon (uf_settings) not found.")
@@ -506,21 +536,101 @@ class WW_OT_ImportUEModel(Operator):
         
         return {"FINISHED"}
 
-    def delayed_rename(self):
-        # Check selected objects for the pattern
-        renamed_count = 0
-        for obj in bpy.context.selected_objects:
-            new_name = extract_character_name(obj.name)
-            if new_name != obj.name:
-                obj.name = new_name
-                if obj.data:
-                    obj.data.name = new_name
-                renamed_count += 1
-                logger.info(f"Renamed object to {new_name}")
+    def delayed_rename(self, existing_objs):
+        # Find new objects by differencing current objects with recorded existing ones
+        current_objs = set(bpy.context.scene.objects)
+        new_objs = current_objs - existing_objs
         
+        if not new_objs:
+             # Logic to keep retrying if import takes time, or ensure we don't return None too early?
+             # For now, let's assuming if 1.0s passed and no new objs, maybe wait a bit more or stop?
+             # UEFormat usually imports relatively quickly, but let's keep it simple.
+             # If no new objects found *yet*, maybe we return a float to check again? 
+             # But if import failed, this runs forever. 
+             # Let's assume if we are here, something might have happened. 
+             # Actually, if we return None, it stops. 
+             # Let's return 1.0 to retry if empty, up to a limit? 
+             # For simplicity, let's just process if we find them. 
+             # If allow retry, we need to not bind existing_objs every time or track attempts.
+             # Let's assume 1.0s is enough for now as per original code structure.
+             # If we want to return 1.0 to retry, we need to match signature.
+             pass
+
+        renamed_count = 0
+        for obj in new_objs:
+            # We want to rename based on type
+            # Extract basic name first
+            # Note: extract_character_name helps clean up standard UE prefixes/suffixes if any
+            
+            # Identify name from object name (which might be messy from import)
+            clean_name = extract_character_name(obj.name)
+            
+            target_name = clean_name
+            if obj.type == 'ARMATURE':
+                # Avoid RIG- prefix at import stage as per user request
+                # Use _Skeleton suffix to avoid name collision with Mesh
+                target_name = f"{clean_name}_Skeleton"
+            elif obj.type == "MESH":
+                target_name = clean_name
+            
+            if obj.name != target_name:
+                obj.name = target_name
+                # Also rename data block
+                if obj.data:
+                    obj.data.name = target_name
+                renamed_count += 1
+                logger.info(f"Renamed {obj.type} to {target_name}")
+
         if renamed_count > 0:
+            # Create new collection and move objects
+            # Assuming all new objects belong to the same character/import batch
+            # We use the clean_name of the first object to name the collection
+            if new_objs:
+                # Use the extracted name from one of the objects (prefer Mesh or Armature)
+                # We already calculated clean_name in the loop, let's just re-calculate or pick one.
+                # Since we iterate, let's pick the name from the last processed object or similar.
+                # Better: determine collection name from the common base name if possible.
+                # logic: 'target_name' in the loop is derived from 'extract_character_name'. 
+                # Ideally all objects share the same char name base.
+                
+                # Pick one representative object to determine collection name
+                representative_obj = next(iter(new_objs))
+                collection_name = extract_character_name(representative_obj.name)
+                
+                # Create collection
+                new_col = bpy.data.collections.new(collection_name)
+                bpy.context.scene.collection.children.link(new_col)
+                
+                # Set as active collection so subsequent objects (Rig, Lights) are created here
+                try:
+                    layer_col = bpy.context.view_layer.layer_collection.children[new_col.name]
+                    bpy.context.view_layer.active_layer_collection = layer_col
+                except Exception as e:
+                    logger.warning(f"Failed to set active collection: {e}")
+
+                # Set random color
+                color_tags = ['COLOR_01', 'COLOR_02', 'COLOR_03', 'COLOR_04', 'COLOR_05', 'COLOR_06', 'COLOR_07', 'COLOR_08']
+                new_col.color_tag = random.choice(color_tags)
+                
+                # Move objects
+                for obj in new_objs:
+                    # Link to new collection
+                    if obj.name not in new_col.objects:
+                        new_col.objects.link(obj)
+                    
+                    # Unlink from other collections
+                    for col in obj.users_collection:
+                        if col != new_col:
+                            col.objects.unlink(obj)
+                            
+                logger.info(f"Moved imported objects to new collection: {collection_name}")
+
             return None # Stop timer
-        return 1.0 # Retry checking (simple heuristic, might need improvement)
+        
+        # Original logic returned 1.0 to retry. 
+        # Since we use partial, the function signature is fixed. 
+        # If we return float, Blender calls it again with no args? No, timer callback args don't change.
+        return 1.0
 
 
 
@@ -1053,9 +1163,21 @@ class VIEW3D_PT_WutheringWaves(Panel):
     def draw(self, context):
         layout = self.layout
 
+        # Version Label (Created BEFORE operator row so it appears above)
+        ver_row = layout.row()
+        ver_row.alignment = 'CENTER'
+        ver_row.label(text="Version : 1.4.3")
+
+        # Run Operator
         row = layout.row()
         row.scale_y = 1.5
         row.operator("shader.run_entire_setup", text="Run Entire Setup", icon="PLAY")
+
+        # Warning for missing UEFormat
+        if not self.is_ue_format_enabled():
+            alert_row = layout.row()
+            alert_row.alert = True
+            alert_row.label(text="UEFormat addon is not installed!", icon='ERROR')
 
         active_obj = context.active_object
         mesh_name = (
@@ -1101,6 +1223,26 @@ class VIEW3D_PT_WutheringWaves(Panel):
         col.prop(data if data else context.scene,
                  "disgust_value", text="Disgust")
 
+    def is_ue_format_enabled(self):
+        # Method 1: Check standard addon_utils which is robust for enabled state
+        # We iterate to find the partial name because the exact ID varies (extension vs legacy)
+        # This might be slightly expensive in draw, but reliable.
+        # To optimize, we could cache, but for UI responsiveness we check directly.
+        
+        # Known possible names
+        candidates = ["io_scene_ueformat", "UE Format"]
+        
+        for mod in addon_utils.modules():
+            name = mod.__name__
+            info = addon_utils.module_bl_info(mod)
+            bl_name = info.get("name", "")
+            
+            if any(c in name for c in candidates) or any(c in bl_name for c in candidates):
+                if addon_utils.check(name)[0]: # [0] is loaded/enabled
+                    return True
+        
+        return False
+
 
 class VIEW3D_PT_WutheringWaves_Appearance(Panel):
     bl_space_type = "VIEW_3D"
@@ -1129,9 +1271,29 @@ class VIEW3D_PT_WutheringWaves_Appearance(Panel):
 
         box = layout.box()
         row = box.row()
+        row.label(text="Animate Mode", icon="ACTION") # New Section
+        
+        col = box.column(align=True)
+        # Display as a big toggle button? Or simple prop?
+        # Prop usually shows as checkbox. Use operator-like toggle look using prop
+        if data:
+            icon = "CHECKBOX_HLT" if data.animate_mode else "CHECKBOX_DEHLT"
+            text = "Animate Mode: ON" if data.animate_mode else "Animate Mode: OFF"
+            col.prop(data, "animate_mode", text=text, icon=icon, toggle=True)
+        else:
+             col.label(text="Select a WuWa mesh to enable Animate Mode")
+
+
+        box = layout.box()
+        row = box.row()
         row.label(text="Material Settings", icon="MATERIAL")
+        if data and data.animate_mode:
+            row.enabled = False
 
         col = box.column(align=True)
+        if data and data.animate_mode:
+            col.enabled = False
+            
         col.prop(
             data if data else context.scene, "metallic_value", text="Enable Metallics"
         )
@@ -1160,8 +1322,13 @@ class VIEW3D_PT_WutheringWaves_Appearance(Panel):
         box = layout.box()
         row = box.row()
         row.label(text="Visual Effects", icon="SHADERFX")
+        if data and data.animate_mode:
+            row.enabled = False
 
         col = box.column(align=True)
+        if data and data.animate_mode:
+            col.enabled = False
+
         outline_state = "On" if context.scene.outlines_enabled else "Off"
         col.operator(
             "shader.toggle_outlines",

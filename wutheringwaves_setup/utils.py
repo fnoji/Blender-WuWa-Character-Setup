@@ -330,7 +330,12 @@ def extract_character_name(name: str, title_case: bool = True) -> str:
     """
     Extracts the character name from the asset name.
     Example: R2T1ChangLiMd10011_LOD0 -> Changli (if title_case=True) or ChangLi
+    Also handles _Skeleton suffix stripping.
     """
+    # Remove _Skeleton suffix if present
+    if name.endswith("_Skeleton"):
+        name = name[:-9] # len("_Skeleton") is 9
+
     if match := re.search(r"R2T1(.+?)Md\d+_LOD\d+", name):
         extracted = match.group(1)
         return extracted.title() if title_case else extracted
