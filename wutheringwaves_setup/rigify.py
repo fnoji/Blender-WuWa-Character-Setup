@@ -653,8 +653,18 @@ class WW_OT_Rigify(Operator):
                  
              bpy.ops.object.mode_set(mode='OBJECT')
              
-             # IK Stretch
-             for b_name in ["upper_arm_parent.L", "upper_arm_parent.R", "thigh_parent.L", "thigh_parent.R"]:
+             # IK Stretch & Parents
+             for side in [".L", ".R"]:
+                 b_name = "upper_arm_parent" + side
+                 if b_name in RigArmatureObj.pose.bones:
+                     # IK Stretch
+                     RigArmatureObj.pose.bones[b_name]["IK_Stretch"] = 0.000
+                     # IK Parent (Chest)
+                     RigArmatureObj.pose.bones[b_name]["IK_parent"] = 4
+                     # Pole Parent (Torso)
+                     RigArmatureObj.pose.bones[b_name]["pole_parent"] = 2
+
+             for b_name in ["thigh_parent.L", "thigh_parent.R"]:
                  if b_name in RigArmatureObj.pose.bones:
                      RigArmatureObj.pose.bones[b_name]["IK_Stretch"] = 0.000
              

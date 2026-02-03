@@ -46,6 +46,7 @@ from .utils import (
     darken_eye_colors,
     get_suffix,
     extract_character_name,
+    get_target_mesh,
 )
 from .import_shader import WW_OT_ImportShader, WW_OT_ImportTextures
 from .rigify import WW_OT_Rigify
@@ -56,7 +57,7 @@ from .animate_mode import set_animate_mode
 bl_info = {
     "name": "WuWa Character Setup",
     "author": "Akatsuki, fnoji",
-    "version": (1, 4, 3),
+    "version": (1, 4, 4),
     "blender": (4, 1, 0),
     "location": "View3D > UI > Wuthering Waves",
     "description": "Import & Setup Wuthering Waves characters",
@@ -96,9 +97,10 @@ def update_light(self, context):
 
 
 def update_shadow_transition_range(self, context):
-    if not context.active_object or context.active_object.type != "MESH":
+    target_obj = get_target_mesh(context)
+    if not target_obj:
         return
-    mesh_name = context.active_object.name.split(".")[0]
+    mesh_name = target_obj.name.split(".")[0]
     data = next(
         (m for m in context.scene.mesh_texture_mappings if m.mesh_name == mesh_name),
         None,
@@ -107,7 +109,7 @@ def update_shadow_transition_range(self, context):
         data = context.scene.mesh_texture_mappings.add()
         data.mesh_name = mesh_name
     value = self.shadow_transition_range_value
-    for slot in context.active_object.material_slots:
+    for slot in target_obj.material_slots:
         if slot.material and slot.material.use_nodes:
             for node in slot.material.node_tree.nodes:
                 if node.type == "GROUP" and node.node_tree:
@@ -117,9 +119,10 @@ def update_shadow_transition_range(self, context):
 
 
 def update_face_shadow_softness(self, context):
-    if not context.active_object or context.active_object.type != "MESH":
+    target_obj = get_target_mesh(context)
+    if not target_obj:
         return
-    mesh_name = context.active_object.name.split(".")[0]
+    mesh_name = target_obj.name.split(".")[0]
     data = next(
         (m for m in context.scene.mesh_texture_mappings if m.mesh_name == mesh_name),
         None,
@@ -128,7 +131,7 @@ def update_face_shadow_softness(self, context):
         data = context.scene.mesh_texture_mappings.add()
         data.mesh_name = mesh_name
     value = self.face_shadow_softness_value
-    for slot in context.active_object.material_slots:
+    for slot in target_obj.material_slots:
         if slot.material and slot.material.use_nodes:
             for node in slot.material.node_tree.nodes:
                 if node.type == "GROUP" and node.node_tree:
@@ -181,9 +184,10 @@ def update_colors(self, context):
 
 
 def update_blush(self, context):
-    if not context.active_object or context.active_object.type != "MESH":
+    target_obj = get_target_mesh(context)
+    if not target_obj:
         return
-    mesh_name = context.active_object.name.split(".")[0]
+    mesh_name = target_obj.name.split(".")[0]
     data = next(
         (m for m in context.scene.mesh_texture_mappings if m.mesh_name == mesh_name),
         None,
@@ -192,7 +196,7 @@ def update_blush(self, context):
         data = context.scene.mesh_texture_mappings.add()
         data.mesh_name = mesh_name
     value = self.blush_value
-    for slot in context.active_object.material_slots:
+    for slot in target_obj.material_slots:
         if (
             slot.material
             and slot.material.use_nodes
@@ -206,9 +210,10 @@ def update_blush(self, context):
 
 
 def update_disgust(self, context):
-    if not context.active_object or context.active_object.type != "MESH":
+    target_obj = get_target_mesh(context)
+    if not target_obj:
         return
-    mesh_name = context.active_object.name.split(".")[0]
+    mesh_name = target_obj.name.split(".")[0]
     data = next(
         (m for m in context.scene.mesh_texture_mappings if m.mesh_name == mesh_name),
         None,
@@ -217,7 +222,7 @@ def update_disgust(self, context):
         data = context.scene.mesh_texture_mappings.add()
         data.mesh_name = mesh_name
     value = self.disgust_value
-    for slot in context.active_object.material_slots:
+    for slot in target_obj.material_slots:
         if (
             slot.material
             and slot.material.use_nodes
@@ -231,9 +236,10 @@ def update_disgust(self, context):
 
 
 def update_metallic(self, context):
-    if not context.active_object or context.active_object.type != "MESH":
+    target_obj = get_target_mesh(context)
+    if not target_obj:
         return
-    mesh_name = context.active_object.name.split(".")[0]
+    mesh_name = target_obj.name.split(".")[0]
     data = next(
         (m for m in context.scene.mesh_texture_mappings if m.mesh_name == mesh_name),
         None,
@@ -242,7 +248,7 @@ def update_metallic(self, context):
         data = context.scene.mesh_texture_mappings.add()
         data.mesh_name = mesh_name
     value = self.metallic_value
-    for slot in context.active_object.material_slots:
+    for slot in target_obj.material_slots:
         if slot.material and slot.material.use_nodes:
             for node in slot.material.node_tree.nodes:
                 if (
@@ -256,9 +262,10 @@ def update_metallic(self, context):
 
 
 def update_specular(self, context):
-    if not context.active_object or context.active_object.type != "MESH":
+    target_obj = get_target_mesh(context)
+    if not target_obj:
         return
-    mesh_name = context.active_object.name.split(".")[0]
+    mesh_name = target_obj.name.split(".")[0]
     data = next(
         (m for m in context.scene.mesh_texture_mappings if m.mesh_name == mesh_name),
         None,
@@ -267,7 +274,7 @@ def update_specular(self, context):
         data = context.scene.mesh_texture_mappings.add()
         data.mesh_name = mesh_name
     value = self.specular_value
-    for slot in context.active_object.material_slots:
+    for slot in target_obj.material_slots:
         if slot.material and slot.material.use_nodes:
             for node in slot.material.node_tree.nodes:
                 if (
@@ -500,8 +507,17 @@ class WW_OT_ImportUEModel(Operator):
     bl_description = "Import Model using UEFormat (requires UEFormat addon)"
     bl_options = {"REGISTER", "UNDO"}
 
+    is_auto_run: BoolProperty(default=False, options={'HIDDEN'})
+
     def execute(self, context):
+        if context.active_object and context.active_object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
         try:
+            # If manual running (not called by Run Entire Setup), signal potential interruption
+            if not self.is_auto_run:
+                # This status signal can be picked up by a lingering Run Entire Setup modal to cancel itself
+                context.scene.ww_setup_status = "MANUAL_INTERRUPTION"
+            
             settings = context.scene.uf_settings
             
             # Set properties individually
@@ -516,7 +532,9 @@ class WW_OT_ImportUEModel(Operator):
             existing_objs = set(context.scene.objects)
             
             # Deselect all to ensure clean state
-            bpy.ops.object.select_all(action='DESELECT')
+            # bpy.ops.object.select_all(action='DESELECT')
+            for obj in bpy.context.selected_objects:
+                obj.select_set(False)
             
             # Call operator without arguments
             bpy.ops.uf.import_uemodel("INVOKE_DEFAULT")
@@ -744,12 +762,13 @@ class WW_OT_ToggleTexMode(Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        if not context.active_object or context.active_object.type != "MESH":
+        target_obj = get_target_mesh(context)
+        if not target_obj:
             self.report(
                 {"ERROR"}, "Please select a mesh to toggle texture mode.")
             return {"CANCELLED"}
 
-        mesh_name = context.active_object.name.split(".")[0]
+        mesh_name = target_obj.name.split(".")[0]
         data = get_mesh_data(context, mesh_name)
         data.tex_mode = not data.tex_mode
 
@@ -772,7 +791,11 @@ class WW_OT_ToggleTexMode(Operator):
 
     def reassign_textures(self, context, textures: List[Any], tex_mode: bool):
         assigned_count = 0
-        for slot in context.active_object.material_slots:
+        target_obj = get_target_mesh(context)
+        if not target_obj:
+            return
+            
+        for slot in target_obj.material_slots:
             if not slot.material or not (
                 match := re.search(
                     r"WW - ([A-Za-z]+)(_?\d+|(?:_[^_]+)*)?", slot.material.name
@@ -784,7 +807,7 @@ class WW_OT_ToggleTexMode(Operator):
             original_name = next(
                 (
                     s.material.name
-                    for s in context.active_object.material_slots
+                    for s in target_obj.material_slots
                     if s.material
                     and re.match(rf"MI_.*?{base}{version}$", s.material.name)
                 ),
@@ -835,12 +858,13 @@ class WW_OT_ToggleStarMotion(Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        if not context.active_object or context.active_object.type != "MESH":
+        target_obj = get_target_mesh(context)
+        if not target_obj:
             self.report(
                 {"ERROR"}, "Please select a mesh to toggle star motion.")
             return {"CANCELLED"}
 
-        mesh_name = context.active_object.name.split(".")[0]
+        mesh_name = target_obj.name.split(".")[0]
         data = get_mesh_data(context, mesh_name)
         data.star_move = not data.star_move
 
@@ -852,12 +876,16 @@ class WW_OT_ToggleStarMotion(Operator):
         return {"FINISHED"}
 
     def update_star_motion(self, context, mesh_name, star_move):
-        modifier = context.active_object.modifiers.get(
+        target_obj = get_target_mesh(context)
+        if not target_obj:
+            return
+            
+        modifier = target_obj.modifiers.get(
             f"ResonatorStar Move {mesh_name}")
         if modifier and modifier.type == "NODES":
             modifier.show_viewport = star_move
 
-        for slot in context.active_object.material_slots:
+        for slot in target_obj.material_slots:
             if slot.material and slot.material.use_nodes and "WW - ResonatorStar" in slot.material.name:
                 for node in slot.material.node_tree.nodes:
                     if node.type == "GROUP":
@@ -873,12 +901,13 @@ class WW_OT_ToggleHairTrans(Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        if not context.active_object or context.active_object.type != "MESH":
+        target_obj = get_target_mesh(context)
+        if not target_obj:
             self.report(
                 {"ERROR"}, "Please select a mesh to toggle hair transparency.")
             return {"CANCELLED"}
 
-        mesh_name = context.active_object.name.split(".")[0]
+        mesh_name = target_obj.name.split(".")[0]
         data = get_mesh_data(context, mesh_name)
         data.hair_trans = not data.hair_trans
 
@@ -890,7 +919,11 @@ class WW_OT_ToggleHairTrans(Operator):
         return {"FINISHED"}
 
     def update_hair_transparency(self, context, hair_trans):
-        for slot in context.active_object.material_slots:
+        target_obj = get_target_mesh(context)
+        if not target_obj:
+            return
+            
+        for slot in target_obj.material_slots:
             if slot.material and slot.material.use_nodes and slot.material.name.startswith("WW - "):
                 for node in slot.material.node_tree.nodes:
                     if node.type == "GROUP" and node.node_tree and "See Through" in node.node_tree.name:
@@ -904,7 +937,8 @@ class WW_OT_FixEyeUV(Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        if not context.active_object or context.active_object.type != "MESH":
+        target_obj = get_target_mesh(context)
+        if not target_obj:
             self.report(
                 {"ERROR"}, "Please select a mesh to fix eye UV mapping.")
             return {"CANCELLED"}
@@ -924,9 +958,13 @@ class WW_OT_FixEyeUV(Operator):
 
     def fix_eye_uvs(self, context):
         fixed_count = 0
+        target_obj = get_target_mesh(context)
+        if not target_obj:
+            return 0
+            
         eye_materials = [
             slot.material
-            for slot in context.active_object.material_slots
+            for slot in target_obj.material_slots
             if slot.material and "WW - Eye" in slot.material.name
         ]
 
@@ -1056,36 +1094,7 @@ class WW_OT_SeparateMesh(Operator):
                 f"Removed {removed_count} unused vertex groups from {obj.name}")
 
 
-class WW_OT_FixNPCMats(Operator):
-    bl_idname = "shader.fix_npc"
-    bl_label = "Fix NPC Materials"
-    bl_description = "Fix naming issues in NPC materials"
-    bl_options = {"REGISTER", "UNDO"}
 
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        if not obj or obj.type != "MESH":
-            return False
-        return any(
-            slot.material and slot.material.name.startswith("MI_")
-            for slot in obj.material_slots
-        )
-
-    def execute(self, context):
-        fixed_count = 0
-        for slot in context.active_object.material_slots:
-            if slot.material and slot.material.name.startswith("MI_"):
-                parts = slot.material.name.split("_", 2)
-                if len(parts) > 2:
-                    old_name = slot.material.name
-                    slot.material.name = parts[0] + "_" + parts[1] + parts[2]
-                    if old_name != slot.material.name:
-                        fixed_count += 1
-
-        self.report({"INFO"}, f"Fixed {fixed_count} NPC material names.")
-        logger.info(f"Fixed {fixed_count} NPC material names")
-        return {"FINISHED"}
 
 
 class WW_OT_SetOptimize(Operator):
@@ -1166,7 +1175,7 @@ class VIEW3D_PT_WutheringWaves(Panel):
         # Version Label (Created BEFORE operator row so it appears above)
         ver_row = layout.row()
         ver_row.alignment = 'CENTER'
-        ver_row.label(text="Version : 1.4.3")
+        ver_row.label(text="Version : 1.4.4")
 
         # Run Operator
         row = layout.row()
@@ -1179,10 +1188,17 @@ class VIEW3D_PT_WutheringWaves(Panel):
             alert_row.alert = True
             alert_row.label(text="UEFormat addon is not installed!", icon='ERROR')
 
+        # Warning for missing Rigify
+        if not self.is_rigify_enabled():
+            alert_row = layout.row()
+            alert_row.alert = True
+            alert_row.label(text="Rigify addon is not enabled!", icon='ERROR')
+
         active_obj = context.active_object
+        target_obj = get_target_mesh(context)
         mesh_name = (
-            active_obj.name.split(".")[0]
-            if active_obj and active_obj.type == "MESH"
+            target_obj.name.split(".")[0]
+            if target_obj
             else ""
         )
         data = next(
@@ -1243,6 +1259,9 @@ class VIEW3D_PT_WutheringWaves(Panel):
         
         return False
 
+    def is_rigify_enabled(self):
+        return addon_utils.check("rigify")[0]
+
 
 class VIEW3D_PT_WutheringWaves_Appearance(Panel):
     bl_space_type = "VIEW_3D"
@@ -1255,9 +1274,10 @@ class VIEW3D_PT_WutheringWaves_Appearance(Panel):
         layout = self.layout
 
         active_obj = context.active_object
+        target_obj = get_target_mesh(context)
         mesh_name = (
-            active_obj.name.split(".")[0]
-            if active_obj and active_obj.type == "MESH"
+            target_obj.name.split(".")[0]
+            if target_obj
             else ""
         )
         data = next(
@@ -1413,7 +1433,7 @@ class VIEW3D_PT_WutheringWaves_Tools(Panel):
 
         col = box.column(align=True)
         col.operator("shader.separate_by_vertex_group", icon="MOD_EDGESPLIT")
-        col.operator("shader.fix_npc", icon="MATERIAL")
+
 
         # box = layout.box()
         # row = box.row()
@@ -1443,7 +1463,7 @@ classes = [
     WW_OT_FixEyeUV,
     WW_OT_SeparateMesh,
     WW_OT_SetOptimize,
-    WW_OT_FixNPCMats,
+
     VIEW3D_PT_WutheringWaves,
     VIEW3D_PT_WutheringWaves_Appearance,
     VIEW3D_PT_WutheringWaves_Light,

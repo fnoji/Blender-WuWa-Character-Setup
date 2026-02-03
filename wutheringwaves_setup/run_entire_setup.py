@@ -23,6 +23,12 @@ class WW_OT_RunEntireSetup(Operator):
                 return {'PASS_THROUGH'}
             self._last_check_time = time.time()
 
+            # Check for manual interruption signal
+            if context.scene.ww_setup_status == "MANUAL_INTERRUPTION":
+                self.report({'WARNING'}, "Run Entire Setup: Interrupted by manual operation.")
+                self.cancel(context)
+                return {'CANCELLED'}
+
             if self._state == "WAIT_FOR_MODEL":
                 # Check if a new armature is active
                 obj = context.active_object
@@ -75,7 +81,8 @@ class WW_OT_RunEntireSetup(Operator):
                 # We assume the user wants to pick a file. 
                 logger.info("Starting Import Shader...")
                 context.scene.ww_setup_status = "IMPORTING_SHADER"
-                bpy.ops.shader.import_shader('INVOKE_DEFAULT')
+                # Pass is_auto_run=True to prevent self-cancellation/interruption signal
+                bpy.ops.shader.import_shader('INVOKE_DEFAULT', is_auto_run=True)
                 self._state = "WAIT_FOR_SHADER"
                 
             elif self._state == "WAIT_FOR_SHADER":
@@ -134,7 +141,8 @@ class WW_OT_RunEntireSetup(Operator):
         # This will likely open a file browser.
         # The user interacts with it, and eventually the model appears.
         logger.info("Starting Run Entire Setup sequence...")
-        bpy.ops.shader.import_uemodel('INVOKE_DEFAULT')
+        # Pass is_auto_run=True to indicate this is the chained execution
+        bpy.ops.shader.import_uemodel('INVOKE_DEFAULT', is_auto_run=True)
 
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.1, window=context.window)

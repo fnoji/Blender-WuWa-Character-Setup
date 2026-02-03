@@ -33,9 +33,12 @@ TEXTURE_TYPE_MAPPINGS = {
         "Hair Diffuse",
         "Face Diffuse",
         "Eye Diffuse",
+        "Body Diffuse",
+        "Npc Diffuse",
+        "NPC Diffuse",
     ),
     "_N": ("Normal Map",),
-    "_HM": ("Hair HM", "Bangs HM"),
+    "_HM": ("Hair HM", "Bangs HM", "Normal Map"),
     "_HET": ("Eye HET", "Face HET"),
     "_ID": ("Mask ID",),
 }
@@ -74,6 +77,40 @@ def get_armature_from_modifiers(mesh):
     for modifier in mesh.modifiers:
         if modifier.type == "ARMATURE" and modifier.object:
             return modifier.object
+    return None
+
+
+def get_target_mesh(context) -> Optional[bpy.types.Object]:
+    """
+    Resolves the target character mesh from the current context.
+    Prioritizes active object if it's a Mesh.
+    If active object is Armature, looks for a Mesh that uses this Armature.
+    """
+    active_obj = context.active_object
+    if not active_obj:
+        return None
+
+    if active_obj.type == 'MESH':
+        return active_obj
+    
+    if active_obj.type == 'ARMATURE':
+        # Find mesh that targets this armature
+        # We iterate over selected objects first to prioritize selection
+        # If not found in selection, check all objects (fallback)
+        
+        # Priority 1: Selected Mesh that uses this armature (if multiple selected)
+        # However, requirement says "If multiple selected, prioritize higher (light orange)". 
+        # But 'active_object' IS the light orange one.
+        # If active is Armature, we need the associated mesh.
+        
+        candidates = [
+            obj for obj in bpy.data.objects 
+            if obj.type == 'MESH' and get_armature_from_modifiers(obj) == active_obj
+        ]
+        
+        if candidates:
+            return candidates[0]
+            
     return None
 
 
@@ -176,6 +213,39 @@ def split_material_name(mat_name: str) -> Tuple[str, str]:
         return "", ""
 
     category_part = parts[1]
+    
+    # Handle NPC naming where category might be just "Npc" or similar simple names
+    if category_part in ["Npc", "NH", "NPC"]:
+        # Try to extract the part name from the end of the remaining string
+        # e.g. FemaleMS_003_Bangs -> Bangs
+        if len(parts) > 2:
+            remaining = parts[2]
+            # Split by rightmost underscore to get suffix
+            if "_" in remaining:
+                suffix = remaining.rsplit("_", 1)[-1]
+                
+                # Clean suffix if it starts with numbers but contains text (e.g. 001Face -> Face)
+                # This ensures we match 'WW - Face' instead of 'WW - 001Face'
+                if re.match(r"^\d+[A-Za-z]", suffix):
+                    suffix = re.sub(r"^\d+", "", suffix)
+                
+                return suffix, ""
+            
+            # If no underscore, maybe the whole thing is the part?
+            # Also clean here just in case
+            if re.match(r"^\d+[A-Za-z]", remaining):
+                return re.sub(r"^\d+", "", remaining), ""
+            
+            return remaining, ""
+         
+        base_part = category_part
+        # Logic for version: likely the next part is Body/Face etc.
+        if len(parts) > 2:
+            version = "_" + parts[2]
+        else:
+            version = ""
+        return base_part, version
+
     words = re.findall(r"[A-Z][a-z]*", category_part)
     if not words:
         return "", category_part if len(parts) <= 2 else "_" + parts[2]
@@ -232,19 +302,22 @@ def get_suffix():
 def make_texture_patterns(params: TextureSearchParameters):
     patterns = []
     
+    # NPC support: Add patterns for NpcBody etc.
+    # If base_part is Npc, we want T_NpcBody_D.png etc. 
+    # Current logic extracts base_no_ver from base_part.
+    
     # For Version mode (tex_mode=False), add alternative texture patterns first
-    # These patterns support: _Switch_D (e.g., Down_Switch_D) and Damage variants (e.g., DownDamage_D)
     if not params.mode:  # Version mode
         if params.original_name:
             if match := re.search(r"MI_(.*)", params.original_name):
                 base = match.group(1)
                 base_no_ver = re.sub(r"[0-9_]+$", "", base)
                 
-                # Switch pattern: Down_D -> Down_Switch_D
+                # Switch pattern
                 switch_pat = f"T_{base_no_ver}_Switch{params.suffix}"
                 patterns.append(switch_pat)
                 
-                # Damage pattern: Down_D -> DownDamage_D
+                # Damage pattern
                 damage_pat = f"T_{base_no_ver}Damage{params.suffix}"
                 patterns.append(damage_pat)
         else:
@@ -258,11 +331,29 @@ def make_texture_patterns(params: TextureSearchParameters):
             damage_pat = f"T_.*?{base_no_ver}Damage{params.suffix}"
             patterns.append(damage_pat)
 
-    # Original logic for base and version patterns
+    # Standard patterns
     if params.original_name:
         if match := re.search(r"MI_(.*)", params.original_name):
             base = match.group(1)
             base_no_ver = re.sub(r"[0-9_]+$", "", base)
+
+            # Strip NH_ prefix if present for finding normalized textures
+            if base.startswith("NH_"):
+                base_no_nh = base[3:]
+                base_no_ver_no_nh = re.sub(r"[0-9_]+$", "", base_no_nh)
+                
+                # Add No-NH patterns (T_FemaleMS_003_Bangs...)
+                patterns.append(f"T_{base_no_nh}{params.suffix}")
+                patterns.append(f"T_{base_no_ver_no_nh}{params.suffix}")
+            
+            # Special logic for Up02 to allow fallback to Down, preventing generic Up match
+            if "Up02" in base:
+                # 1. Search specific Up02
+                patterns.append(f"T_{base}{params.suffix}")
+                # 2. Search Down
+                patterns.append(f"T_.*?Down{params.suffix}")
+                # Return immediately to avoid 'Up' -> 'Up' generic match
+                return list(dict.fromkeys(patterns))
 
             replacements = {"Up": "Upper", "Eye": "Eyes", "Star": "Up"}
 
@@ -283,6 +374,7 @@ def make_texture_patterns(params: TextureSearchParameters):
                 [ver_pat, base_pat] if not params.mode else [base_pat, ver_pat]
             )
     else:
+        # Fallback for constructed names
         base_no_ver = re.sub(r"[0-9_]+$", "", params.base_part)
 
         replacements = {"Up": "Upper", "Eye": "Eyes", "Star": "Up"}
@@ -296,11 +388,48 @@ def make_texture_patterns(params: TextureSearchParameters):
                 )
                 patterns.extend([p.replace(k, v) for p in patterns[:]])
                 return list(dict.fromkeys(patterns))
-
+        
+        # Generic construction
+        # For NPC: base_part="Npc", version="Body". 
+        # base_no_ver="Npc". 
+        # patterns: T_...Npc... , T_...NpcBody...
+        
         base_pat = f"T_.*?{base_no_ver}{params.suffix}"
+        
+        # Original: f"T_.*?{params.base_part}{params.version}{params.suffix}"
+        # If version starts with "_", we might want to handle it.
+        # But split_material_name puts "_" in version usually.
+        # Check if version has leading underscore that matches file naming?
+        # File naming usually: T_NpcBody_D.png -> "NpcBody"
+        # base_part="Npc", version="_Body" -> "Npc_Body"? No usually concatenated or snake case.
+        # Let's add patterns with and without underscore separator for version if it helps.
+        
         ver_pat = f"T_.*?{params.base_part}{params.version}{params.suffix}"
+        # Clean potential double underscores or issues
+        ver_pat = ver_pat.replace("__", "_")
+        
+        # Special case for NPC loose matching
+        if "Npc" in params.base_part:
+             # Try stricter match first? Or just add it.
+             # T_NpcBody is common.
+             # base_part=Npc, version=_Body -> T_.*?Npc_Body
+             # We also want T_.*?NpcBody
+             ver_pat_joined = f"T_.*?{params.base_part}{params.version.replace('_', '')}{params.suffix}"
+             patterns.append(ver_pat_joined)
+
+        # Special Case: Up02 often implies Lower Body parts which share "Down" textures
+        if "Up02" in params.base_part:
+             # Add Patterns for "Down"
+             patterns.append(f"T_.*?Down{params.suffix}")
+             patterns.append(f"T_Down{params.suffix}")
+             # Add specific Up02 if needed, but return to avoid generic 'Up' logic
+             patterns.append(ver_pat)
+             patterns.append(base_pat)
+             return list(dict.fromkeys(patterns))
+
         patterns.extend([ver_pat, base_pat]
                         if not params.mode else [base_pat, ver_pat])
+
 
     return list(dict.fromkeys(patterns))
 
@@ -330,13 +459,29 @@ def extract_character_name(name: str, title_case: bool = True) -> str:
     """
     Extracts the character name from the asset name.
     Example: R2T1ChangLiMd10011_LOD0 -> Changli (if title_case=True) or ChangLi
-    Also handles _Skeleton suffix stripping.
+    Now supports NH / NHT1 prefixes for NPCs.
     """
     # Remove _Skeleton suffix if present
+    # Remove _Skeleton suffix if present
     if name.endswith("_Skeleton"):
-        name = name[:-9] # len("_Skeleton") is 9
+        name = name[:-9] 
 
+    # R2T1 (Standard PC format with Md ID)
     if match := re.search(r"R2T1(.+?)Md\d+_LOD\d+", name):
         extracted = match.group(1)
         return extracted.title() if title_case else extracted
+    
+    # NHT1 (NPC format without Md ID)
+    # Example: NHT1KamolaJingzhong_LOD0 -> KamolaJingzhong
+    if match := re.search(r"NHT1(.+?)_LOD\d+", name):
+        extracted = match.group(1)
+        return extracted.title() if title_case else extracted
+
+    # NH_ (Generic NPC format)
+    # Example: NH_FemaleMS_003_LOD0 -> FemaleMS_003
+    if match := re.search(r"NH_(.+?)_LOD\d+", name):
+        extracted = match.group(1)
+        return extracted.title() if title_case else extracted
+    
+    # Fallback/Pass-through if no match
     return name

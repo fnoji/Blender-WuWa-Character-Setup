@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from typing import Dict, List, Any
-from bpy.props import StringProperty, CollectionProperty
+from bpy.props import StringProperty, CollectionProperty, BoolProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Vector
@@ -235,7 +235,9 @@ def add_head_lock(mesh_name: str):
     constraint.subtarget = head_bone
 
     bpy.context.view_layer.objects.active = head_origin
-    bpy.ops.object.select_all(action="DESELECT")
+    # bpy.ops.object.select_all(action="DESELECT")
+    for obj in bpy.context.selected_objects:
+        obj.select_set(False)
     head_origin.select_set(True)
     context_override = bpy.context.copy()
     context_override["constraint"] = constraint
@@ -253,7 +255,9 @@ def add_head_lock(mesh_name: str):
 def apply_head_lock():
     suffix = get_suffix()
     if head_origin := bpy.data.objects.get(f"Head Origin{suffix}"):
-        bpy.ops.object.select_all(action="DESELECT")
+        # bpy.ops.object.select_all(action="DESELECT")
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
         head_origin.select_set(True)
         bpy.context.view_layer.objects.active = head_origin
 
@@ -304,6 +308,8 @@ class WW_OT_ImportShader(Operator, ImportHelper):
     filename_ext = ".blend"
     filter_glob: StringProperty(default="*.blend", options={"HIDDEN"})
 
+    is_auto_run: BoolProperty(default=False, options={'HIDDEN'})
+
     def invoke(self, context, event):
         if hasattr(context.scene, "shader_file_path") and os.path.exists(
             context.scene.shader_file_path
@@ -313,6 +319,9 @@ class WW_OT_ImportShader(Operator, ImportHelper):
         return ImportHelper.invoke(self, context, event)
 
     def execute(self, context):
+        if not self.is_auto_run:
+            context.scene.ww_setup_status = "MANUAL_INTERRUPTION"
+
         if not self.validate_context(context):
             return {"CANCELLED"}
 
@@ -451,8 +460,16 @@ class WW_OT_ImportShader(Operator, ImportHelper):
         mat_map = {"Eyes": "Eye", "Bang": "Bangs"}
         stars = {}
         mesh_name = context.active_object.name.split(".")[0]
+        
+        # NH Logic Check
+        # Object name might be renamed (NH_ stripped), so check materials too
+        is_nh = "NH_" in context.active_object.name or any("MI_NH_" in s.material.name for s in context.active_object.material_slots if s.material)
+        has_bangs = any(
+            slot.material and ("Bang" in slot.material.name or "Bangs" in slot.material.name)
+            for slot in context.active_object.material_slots
+        )
 
-        logger.info(f"Processing materials for {mesh_name}")
+        logger.info(f"Processing materials for {mesh_name} (NH: {is_nh}, Has Bangs: {has_bangs})")
         processed_count = 0
 
         for slot in context.active_object.material_slots:
@@ -466,8 +483,14 @@ class WW_OT_ImportShader(Operator, ImportHelper):
                 if not target_shader:
                     continue
 
+                source_override = None
+                # Special logic for NH Hair without Bangs -> Use Main Shader for Hair
+                if is_nh and not has_bangs and "Hair" in target_shader:
+                    source_override = "WW - Main"
+                    logger.info(f"NH Character without Bangs detected. Using WW - Main for {target_shader}")
+
                 new_material = self.duplicate_material(
-                    target_shader, mesh_name)
+                    target_shader, mesh_name, source_override)
                 
                 # Lock original material
                 # slot.material.use_fake_user = True
@@ -531,14 +554,19 @@ class WW_OT_ImportShader(Operator, ImportHelper):
             mapped = mat_map.get(base, base)
             return f"WW - {mapped}{version}"
 
-    def duplicate_material(self, shader_name: str, mesh_name: str):
+    def duplicate_material(self, shader_name: str, mesh_name: str, source_override: str = None):
         unique_name = f"{shader_name} {extract_character_name(mesh_name)}"
         if unique_name in bpy.data.materials:
             return bpy.data.materials[unique_name]
+        
+        source_name = source_override if source_override else shader_name
 
-        if shader_name in bpy.data.materials:
-            material = bpy.data.materials[shader_name].copy()
-        elif base_match := re.match(r"WW - ([A-Za-z]+)", shader_name):
+        if source_name in bpy.data.materials:
+            material = bpy.data.materials[source_name].copy()
+        elif base_match := re.match(r"WW - ([A-Za-z0-9]+)", shader_name): # fallback to shader_name base if source not found? or source base?
+             # If source override matches existing, line above catches it.
+             # If shader_name is derived (WW - Hair ...), try getting base from it?
+             # Assuming standard logic for "WW - Main" fallback.
             base_name = base_match.group(0)
             material = bpy.data.materials.get(
                 base_name, bpy.data.materials.get("WW - Main")
@@ -653,7 +681,7 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
             original_name = ""
 
             # Check for WW materials
-            if match := re.search(r"WW - ([A-Za-z]+)(_?\d+|(?:_[^_]+)*)?", mat_name):
+            if match := re.search(r"WW - ([A-Za-z0-9]+)(_?\d+|(?:_[^_]+)*)?", mat_name):
                 base, version = match.group(1), match.group(2) or ""
                 original_name = self.get_original_material_name(context, base, version)
             
