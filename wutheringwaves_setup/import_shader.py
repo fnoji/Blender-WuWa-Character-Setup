@@ -22,6 +22,9 @@ from .utils import (
     set_solid_view,
     set_material_view,
     TEXTURE_TYPE_MAPPINGS,
+    SHADER_TYPE_JAREDNYTS,
+    SHADER_TYPE_JONN,
+    get_texture_mappings,
     TextureSearchParameters,
     MaterialDetails,
     MaterialTextureData,
@@ -57,15 +60,33 @@ def init_scene():
     bpy.context.scene.is_first_use = False
 
 
-def import_node_groups(path: str):
-    node_trees = ["Light Vectors", "WW - Outlines", "ResonatorStar Move"]
-    objects = {
-        "Light Direction": False,
-        "Head Origin": False,
-        "Head Forward": False,
-        "Head Up": False,
-        "Circle": False,
-    }
+def import_node_groups(path: str, shader_type: str = SHADER_TYPE_JAREDNYTS):
+    """Import node groups and objects based on shader type."""
+    if shader_type == SHADER_TYPE_JONN:
+        # Jonn Gathering Wives shader
+        node_trees = [
+            "[GW] Vectors",
+            "[GW] Outlines",
+            "Gathering Wives [Body]",
+            "Gathering Wives [Face]",
+            "Gathering Wives [Eye]",
+            "Gathering Wives [Hair]",
+            "Gathering Wives [Shader]",
+        ]
+        objects = {
+            "Main Light": False,
+            "Head Controller": False,
+        }
+    else:
+        # JaredNyts shader (default)
+        node_trees = ["Light Vectors", "WW - Outlines", "ResonatorStar Move"]
+        objects = {
+            "Light Direction": False,
+            "Head Origin": False,
+            "Head Forward": False,
+            "Head Up": False,
+            "Circle": False,
+        }
 
     for name in node_trees:
         try:
@@ -86,19 +107,27 @@ def import_node_groups(path: str):
             except Exception as e:
                 logger.warning(f"Failed to append object {obj_name}: {str(e)}")
 
-
-def init_modifiers():
+def init_modifiers(shader_type: str = SHADER_TYPE_JAREDNYTS):
+    """Initialize modifiers based on shader type."""
     ctx = bpy.context
     if not ctx.active_object or ctx.active_object.type != "MESH":
         return
 
     mesh_name = ctx.active_object.name.split(".")[0]
     suffix = get_suffix()
-    setup_controls(ctx, mesh_name, suffix)
-    set_modifiers(ctx, mesh_name, suffix)
-    add_head_lock(mesh_name)
-    apply_head_lock()
-    logger.info(f"Initialized modifiers for {mesh_name}")
+    
+    if shader_type == SHADER_TYPE_JONN:
+        # Jonn Gathering Wives modifiers
+        setup_controls_jonn(ctx, mesh_name)
+        set_modifiers_jonn(ctx, mesh_name)
+    else:
+        # JaredNyts modifiers (default)
+        setup_controls(ctx, mesh_name, suffix)
+        set_modifiers(ctx, mesh_name, suffix)
+        add_head_lock(mesh_name)
+        apply_head_lock()
+    
+    logger.info(f"Initialized modifiers for {mesh_name} (shader: {shader_type})")
 
 
 def setup_controls(ctx, mesh_name: str, suffix: str):
@@ -202,6 +231,159 @@ def set_modifiers(ctx, mesh_name: str, suffix: str):
         logger.info(f"Set up {base_name} modifier for {mesh_name}")
 
 
+def setup_controls_jonn(ctx, mesh_name: str):
+    """Setup control objects for Jonn Gathering Wives shader.
+    Duplicates Main Light and Head Controller for each character."""
+    control_objects = ["Main Light", "Head Controller"]
+    
+    # Determine if we need new control objects
+    # Check how many [GW] Vectors node groups exist (one per character)
+    # OR count existing Main Light objects that were already set up
+    existing_gw_vectors = [ng for ng in bpy.data.node_groups if ng.name.startswith("[GW] Vectors ")]
+    
+    # If no character-specific vectors exist yet, this is the 1st character
+    # If 1+ exist, this is the 2nd+ character and needs new suffixed controls
+    if len(existing_gw_vectors) == 0:
+        # First character - use original objects (no suffix)
+        suffix = ""
+    else:
+        # 2nd+ character - create new suffixed copies
+        # Suffix is .001 for 2nd, .002 for 3rd, etc.
+        suffix = f".{len(existing_gw_vectors):03d}"
+    
+    # Duplicate control objects for this character if needed (2nd+ characters)
+    if suffix:
+        for obj_name in control_objects:
+            suffixed_name = obj_name + suffix
+            if suffixed_name not in bpy.data.objects and obj_name in bpy.data.objects:
+                orig = bpy.data.objects[obj_name]
+                new_obj = orig.copy()
+                new_obj.name = suffixed_name
+                new_obj.location = orig.location.copy()
+                new_obj.rotation_euler = orig.rotation_euler.copy()
+                new_obj.scale = orig.scale.copy()
+                bpy.context.collection.objects.link(new_obj)
+                logger.info(f"Created control object: {new_obj.name}")
+    
+    # Head Controller constraint setup
+    head_controller = bpy.data.objects.get(f"Head Controller{suffix}")
+    mesh = bpy.data.objects.get(mesh_name)
+    armature = get_armature_from_modifiers(mesh) if mesh else None
+    
+    if not head_controller or not armature:
+        logger.warning(f"Head Controller{suffix} or armature not found for Jonn setup")
+        return
+    
+    # Find head bone (try common names)
+    head_bone = None
+    for bone_name in ["Bip001Head", "c_head.x", "Head"]:
+        if bone_name in armature.data.bones:
+            head_bone = bone_name
+            break
+    
+    if not head_bone:
+        logger.warning(f"Head bone not found in armature {armature.name}")
+        return
+    
+    # Use existing Child Of constraint OR create new one
+    # First look for existing "Child Of" (from blend file import)
+    constraint = head_controller.constraints.get("Child Of")
+    if not constraint:
+        # Try "Head Lock" (if we created it before)
+        constraint = head_controller.constraints.get("Head Lock")
+    if not constraint:
+        # Create new constraint
+        constraint = head_controller.constraints.new("CHILD_OF")
+    
+    # Ensure constraint name and settings
+    constraint.name = "Child Of"  # Keep original name to avoid duplicates
+    constraint.target = armature
+    constraint.subtarget = head_bone
+    
+    # Set Inverse
+    ctx.view_layer.update()
+    matrix = constraint.target.matrix_world @ constraint.target.pose.bones[head_bone].matrix
+    constraint.inverse_matrix = matrix.inverted()
+    
+    logger.info(f"Set up Head Controller constraint for {mesh_name}")
+
+
+def set_modifiers_jonn(ctx, mesh_name: str):
+    """Set up Jonn Gathering Wives specific modifiers."""
+    mesh_obj = ctx.active_object
+    
+    # Calculate suffix based on existing [GW] Vectors node groups
+    # This is called AFTER setup_controls_jonn, so new control objects should exist
+    # We need to find WHICH suffix was used for this character's controls
+    existing_gw_vectors = [ng for ng in bpy.data.node_groups 
+                          if ng.name.startswith("[GW] Vectors ") and ng.name != f"[GW] Vectors {mesh_name}"]
+    
+    # If no OTHER character-specific vectors exist, this is the 1st character (no suffix)
+    # If 1+ OTHER exist, this character uses suffixed controls
+    if len(existing_gw_vectors) == 0:
+        suffix = ""
+    else:
+        suffix = f".{len(existing_gw_vectors):03d}"
+    
+    # LIGHT VECTOR modifier
+    gw_vectors_group = bpy.data.node_groups.get("[GW] Vectors")
+    if gw_vectors_group:
+        new_group_name = f"[GW] Vectors {mesh_name}"
+        new_group = bpy.data.node_groups.get(new_group_name) or gw_vectors_group.copy()
+        new_group.name = new_group_name
+        
+        modifier = mesh_obj.modifiers.get(new_group_name) or mesh_obj.modifiers.new(new_group_name, "NODES")
+        modifier.name = "LIGHT VECTOR"
+        modifier.node_group = new_group
+        
+        # Set inputs - use suffixed object names
+        if main_light := bpy.data.objects.get(f"Main Light{suffix}"):
+            modifier["Input_2"] = main_light
+        if head_controller := bpy.data.objects.get(f"Head Controller{suffix}"):
+            modifier["Socket_1"] = head_controller
+        
+        # Set attribute names
+        modifier["Output_6_attribute_name"] = "lightDirection"
+        modifier["Output_7_attribute_name"] = "headForward"
+        modifier["Output_8_attribute_name"] = "headUp"
+        
+        logger.info(f"Set up [GW] Vectors modifier for {mesh_name} (suffix: {suffix})")
+    
+    # OUTLINE modifier
+    gw_outlines_group = bpy.data.node_groups.get("[GW] Outlines")
+    if gw_outlines_group:
+        new_group_name = f"[GW] Outlines {mesh_name}"
+        new_group = bpy.data.node_groups.get(new_group_name) or gw_outlines_group.copy()
+        new_group.name = new_group_name
+        
+        modifier = mesh_obj.modifiers.get(new_group_name) or mesh_obj.modifiers.new(new_group_name, "NODES")
+        modifier.name = "OUTLINE"
+        modifier.node_group = new_group
+        
+        # Find Face and Eye materials
+        face_mat = None
+        eye_mat = None
+        for slot in mesh_obj.material_slots:
+            if slot.material:
+                if "Face" in slot.material.name and not face_mat:
+                    face_mat = slot.material
+                elif "Eye" in slot.material.name and not eye_mat:
+                    eye_mat = slot.material
+        
+        # Set inputs
+        if face_mat:
+            modifier["Socket_1"] = face_mat
+        if eye_mat:
+            modifier["Socket_2"] = eye_mat
+        modifier["Input_2_use_attribute"] = True
+        modifier["Input_2_attribute_name"] = "COL0"
+        modifier["Input_5"] = 0.1
+        
+        modifier.show_viewport = ctx.scene.outlines_enabled
+        
+        logger.info(f"Set up [GW] Outlines modifier for {mesh_name}")
+
+
 def add_head_lock(mesh_name: str):
     suffix = get_suffix()
     head_origin = bpy.data.objects.get(f"Head Origin{suffix}")
@@ -298,6 +480,294 @@ def set_star_shader(material: bpy.types.Material, mat_name: str, stars: Dict[str
                         )
 
 
+def create_seethru_mesh(context, original_object, shader_filepath: str):
+    """
+    Create a SEETHRU mesh by duplicating only Face/Eye material mesh parts.
+    This replicates the manual workflow: Edit Mode -> Select Face/Eye faces -> Shift+D -> P
+    
+    ONLY creates SEETHRU for Jonn shader (detected by LIGHT VECTOR modifier).
+    JaredNyts shader does not need SEETHRU mesh.
+    
+    Args:
+        context: Blender context
+        original_object: The mesh object to process
+        shader_filepath: Path to the shader .blend file for importing SEETHRU materials
+        
+    Returns:
+        The newly created SEETHRU object, or None if no Face/Eye materials found or not Jonn shader
+    """
+    if not original_object or original_object.type != 'MESH':
+        return None
+    
+    # Check if this is Jonn shader (has LIGHT VECTOR modifier)
+    # JaredNyts uses "Light Vectors {name}" modifier instead
+    is_jonn_shader = any(mod.name == "LIGHT VECTOR" for mod in original_object.modifiers)
+    if not is_jonn_shader:
+        logger.info("Not Jonn shader (no LIGHT VECTOR modifier) - skipping SEETHRU mesh creation")
+        return None
+    
+    # 1. Find Face/Eye material slot indices and store references
+    face_eye_indices = []
+    face_materials = {}  # slot_index -> material
+    eye_materials = {}   # slot_index -> material
+    
+    for i, slot in enumerate(original_object.material_slots):
+        if slot.material:
+            mat_name = slot.material.name
+            # Check for WW - Face or WW - Eye materials
+            if "Face" in mat_name and "WW -" in mat_name and "_SEETHRU" not in mat_name:
+                face_eye_indices.append(i)
+                face_materials[i] = slot.material
+                logger.info(f"Found Face material at slot {i}: {mat_name}")
+            elif "Eye" in mat_name and "WW -" in mat_name and "_SEETHRU" not in mat_name:
+                face_eye_indices.append(i)
+                eye_materials[i] = slot.material
+                logger.info(f"Found Eye material at slot {i}: {mat_name}")
+    
+    if not face_eye_indices:
+        logger.info("No Face/Eye materials found, skipping SEETHRU mesh creation")
+        return None
+    
+    # Get armature from original object for later parenting
+    armature = get_armature_from_modifiers(original_object)
+    if armature:
+        logger.info(f"Found armature for parenting: {armature.name} (type: {armature.type})")
+    else:
+        logger.warning("No armature found for SEETHRU mesh parenting")
+    
+    # Track existing mesh objects BEFORE the operation
+    existing_mesh_objects = {obj.name for obj in bpy.data.objects if obj.type == 'MESH'}
+    logger.info(f"Existing mesh objects before operation: {len(existing_mesh_objects)}")
+    
+    # Deselect ALL objects first to ensure clean state
+    for obj in bpy.data.objects:
+        obj.select_set(False)
+    
+    # Ensure we're working with the correct object
+    context.view_layer.objects.active = original_object
+    original_object.select_set(True)
+    
+    # 2. Switch to Object mode to manipulate polygon selection
+    if context.object.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # 3. Select polygons with Face/Eye materials
+    mesh = original_object.data
+    
+    # Deselect all mesh elements first
+    for poly in mesh.polygons:
+        poly.select = False
+    for edge in mesh.edges:
+        edge.select = False
+    for vert in mesh.vertices:
+        vert.select = False
+    
+    # Select Face/Eye polygons
+    selected_count = 0
+    for poly in mesh.polygons:
+        if poly.material_index in face_eye_indices:
+            poly.select = True
+            selected_count += 1
+    
+    logger.info(f"Selected {selected_count} polygons with Face/Eye materials")
+    
+    if selected_count == 0:
+        logger.warning("No polygons selected for SEETHRU mesh")
+        return None
+    
+    # 4. Enter Edit mode, duplicate and separate
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.duplicate()
+    bpy.ops.mesh.separate(type='SELECTED')
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # 5. Find the newly created object by comparing with existing objects
+    seethru_object = None
+    for obj in bpy.data.objects:
+        if obj.type == 'MESH' and obj.name not in existing_mesh_objects:
+            seethru_object = obj
+            logger.info(f"Found new mesh object: {obj.name}")
+            break
+    
+    if not seethru_object:
+        logger.error("Failed to create SEETHRU mesh - no new object found")
+        return None
+    
+    # 6. Rename the SEETHRU object
+    seethru_name = original_object.name + "_SEETHRU"
+    seethru_object.name = seethru_name
+    logger.info(f"Renamed SEETHRU mesh to: {seethru_object.name}")
+    
+    # 7. Import SEETHRU materials from shader .blend file if not already present
+    seethru_mat_names = ["WW - Face_SEETHRU", "WW - Eye_SEETHRU"]
+    if shader_filepath and os.path.exists(shader_filepath):
+        existing_mats = {mat.name for mat in bpy.data.materials}
+        mats_to_import = [name for name in seethru_mat_names if name not in existing_mats]
+        
+        if mats_to_import:
+            try:
+                with bpy.data.libraries.load(shader_filepath) as (data_from, data_to):
+                    data_to.materials = [
+                        mat_name for mat_name in data_from.materials
+                        if mat_name in mats_to_import
+                    ]
+                logger.info(f"Imported SEETHRU materials: {[m.name for m in data_to.materials]}")
+            except Exception as e:
+                logger.warning(f"Failed to import SEETHRU materials: {str(e)}")
+    
+    # 8. Replace materials with SEETHRU variants and copy textures
+    for slot in seethru_object.material_slots:
+        if not slot.material:
+            continue
+        
+        mat_name = slot.material.name
+        original_mat = slot.material  # Reference to original Face/Eye material
+        
+        # Check if this is a Face material
+        if "Face" in mat_name and "WW -" in mat_name and "_SEETHRU" not in mat_name:
+            seethru_mat = bpy.data.materials.get("WW - Face_SEETHRU")
+            
+            if seethru_mat:
+                # Copy to create character-specific version
+                char_seethru_name = f"WW - Face_SEETHRU {extract_character_name(original_object.name)}"
+                char_seethru_mat = bpy.data.materials.get(char_seethru_name)
+                if not char_seethru_mat:
+                    char_seethru_mat = seethru_mat.copy()
+                    char_seethru_mat.name = char_seethru_name
+                
+                # Copy textures from original Face material
+                copy_textures_between_materials(original_mat, char_seethru_mat)
+                slot.material = char_seethru_mat
+                logger.info(f"Applied SEETHRU material: {char_seethru_name}")
+            else:
+                logger.warning("WW - Face_SEETHRU not found in materials")
+            
+        # Check if this is an Eye material
+        elif "Eye" in mat_name and "WW -" in mat_name and "_SEETHRU" not in mat_name:
+            seethru_mat = bpy.data.materials.get("WW - Eye_SEETHRU")
+            
+            if seethru_mat:
+                # Copy to create character-specific version
+                char_seethru_name = f"WW - Eye_SEETHRU {extract_character_name(original_object.name)}"
+                char_seethru_mat = bpy.data.materials.get(char_seethru_name)
+                if not char_seethru_mat:
+                    char_seethru_mat = seethru_mat.copy()
+                    char_seethru_mat.name = char_seethru_name
+                
+                # Copy textures from original Eye material
+                copy_textures_between_materials(original_mat, char_seethru_mat)
+                slot.material = char_seethru_mat
+                logger.info(f"Applied SEETHRU material: {char_seethru_name}")
+            else:
+                logger.warning("WW - Eye_SEETHRU not found in materials")
+    
+    # 8.5. Clean up material slots - remove all non-SEETHRU materials
+    # Go through slots in reverse order to avoid index issues when removing
+    bpy.context.view_layer.objects.active = seethru_object
+    seethru_object.select_set(True)
+    
+    slots_to_remove = []
+    for i, slot in enumerate(seethru_object.material_slots):
+        if slot.material:
+            if "_SEETHRU" not in slot.material.name:
+                slots_to_remove.append(i)
+        else:
+            slots_to_remove.append(i)  # Remove empty slots too
+    
+    # Remove slots in reverse order to maintain correct indices
+    for i in reversed(slots_to_remove):
+        seethru_object.active_material_index = i
+        bpy.ops.object.material_slot_remove()
+    
+    logger.info(f"Cleaned up material slots - kept {len(seethru_object.material_slots)} SEETHRU materials")
+    
+    # 9. Parent SEETHRU mesh to armature and add Armature modifier
+    if armature:
+        logger.info(f"Setting up parenting for {seethru_object.name} to {armature.name}")
+        
+        # Set parent directly via data (more reliable than operator)
+        seethru_object.parent = armature
+        seethru_object.matrix_parent_inverse = armature.matrix_world.inverted()
+        
+        # Verify parent was set
+        if seethru_object.parent == armature:
+            logger.info(f"SUCCESS: Parented {seethru_object.name} to {armature.name}")
+        else:
+            logger.error(f"FAILED: Parent is {seethru_object.parent}, expected {armature.name}")
+        
+        # Find and update existing Armature modifier (duplicated mesh has one already)
+        armature_mod = None
+        for mod in seethru_object.modifiers:
+            if mod.type == 'ARMATURE':
+                armature_mod = mod
+                logger.info(f"Found existing Armature modifier: {mod.name}, current object: {mod.object}")
+                break
+        
+        if not armature_mod:
+            armature_mod = seethru_object.modifiers.new(name="Armature", type='ARMATURE')
+            logger.info(f"Created new Armature modifier")
+        
+        armature_mod.object = armature
+        armature_mod.use_vertex_groups = True
+        
+        # Verify modifier was set
+        if armature_mod.object == armature:
+            logger.info(f"SUCCESS: Armature modifier object set to {armature.name}")
+        else:
+            logger.error(f"FAILED: Armature modifier object is {armature_mod.object}")
+        
+        # Move SEETHRU into the same collection as original_object
+        original_collections = list(original_object.users_collection)
+        if original_collections:
+            target_collection = original_collections[0]
+            logger.info(f"Moving SEETHRU to collection: {target_collection.name}")
+            # Unlink from current collections
+            for coll in list(seethru_object.users_collection):
+                if seethru_object.name in coll.objects:
+                    coll.objects.unlink(seethru_object)
+            # Link to original object's collection
+            if seethru_object.name not in target_collection.objects:
+                target_collection.objects.link(seethru_object)
+            logger.info(f"Moved {seethru_object.name} to collection {target_collection.name}")
+    else:
+        logger.error("Armature is None - cannot parent SEETHRU mesh")
+    
+    # 10. Restore original object as active and deselect all
+    for obj in bpy.data.objects:
+        obj.select_set(False)
+    
+    original_object.select_set(True)
+    context.view_layer.objects.active = original_object
+    
+    logger.info(f"SEETHRU mesh creation complete: {seethru_object.name}")
+    return seethru_object
+
+
+def copy_textures_between_materials(source_mat, target_mat):
+    """
+    Copy texture images from source material to target material.
+    Matches nodes by name (e.g., 'Face Diffuse', 'Eye HET', etc.)
+    """
+    if not source_mat or not target_mat:
+        return
+    
+    if not source_mat.use_nodes or not target_mat.use_nodes:
+        return
+    
+    source_nodes = source_mat.node_tree.nodes
+    target_nodes = target_mat.node_tree.nodes
+    
+    copied_count = 0
+    for source_node in source_nodes:
+        if source_node.type == 'TEX_IMAGE' and source_node.image:
+            # Find matching node in target by name
+            target_node = target_nodes.get(source_node.name)
+            if target_node and target_node.type == 'TEX_IMAGE':
+                target_node.image = source_node.image
+                copied_count += 1
+                logger.info(f"Copied texture '{source_node.image.name}' to node '{source_node.name}'")
+    
+    logger.info(f"Copied {copied_count} textures from {source_mat.name} to {target_mat.name}")
 
 
 class WW_OT_ImportShader(Operator, ImportHelper):
@@ -328,8 +798,9 @@ class WW_OT_ImportShader(Operator, ImportHelper):
         active_obj = context.active_object
         mesh_name = active_obj.name.split(".")[0]
         has_shader = self.check_if_has_shader(context)
+        shader_type = context.scene.shader_type  # Read shader type from scene
 
-        logger.info(f"Starting shader import process for mesh: {mesh_name}")
+        logger.info(f"Starting shader import process for mesh: {mesh_name} (shader: {shader_type})")
         set_solid_view()
 
         if not has_shader:
@@ -343,7 +814,7 @@ class WW_OT_ImportShader(Operator, ImportHelper):
                 context.scene.shader_file_path
             ):
                 logger.info(f"Loading shader file from: {self.filepath}")
-                if not self.import_materials(context):
+                if not self.import_materials(context, shader_type):
                     return {"CANCELLED"}
                 context.scene.shader_file_path = self.filepath
                 logger.info(f"Shader file path saved: {self.filepath}")
@@ -361,7 +832,7 @@ class WW_OT_ImportShader(Operator, ImportHelper):
                 logger.info(
                     f"Loaded {len(data_to.materials)} additional shader materials"
                 )
-                import_node_groups(self.filepath)
+                import_node_groups(self.filepath, shader_type)
                 logger.info("Node groups imported")
 
             self.process_materials(context)
@@ -369,7 +840,7 @@ class WW_OT_ImportShader(Operator, ImportHelper):
             logger.info("Original materials saved to scene")
             darken_eye_colors(context.active_object)
             logger.info("Eye colors adjusted")
-            init_modifiers()
+            init_modifiers(shader_type)
             logger.info("Modifiers initialized")
             bpy.ops.object.mode_set(mode="OBJECT")
             bpy.context.view_layer.objects.active = active_obj
@@ -435,7 +906,7 @@ class WW_OT_ImportShader(Operator, ImportHelper):
             if obj.type == "MESH"
         }
 
-    def import_materials(self, context):
+    def import_materials(self, context, shader_type: str = SHADER_TYPE_JAREDNYTS):
         existing_materials = {mat.name for mat in bpy.data.materials}
         try:
             with bpy.data.libraries.load(self.filepath) as (data_from, data_to):
@@ -446,7 +917,7 @@ class WW_OT_ImportShader(Operator, ImportHelper):
                     and mat_name not in existing_materials
                 ]
             logger.info(f"Imported {len(data_to.materials)} shader materials")
-            import_node_groups(self.filepath)
+            import_node_groups(self.filepath, shader_type)
             init_scene()
             return True
         except Exception as e:
@@ -706,13 +1177,16 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
                 
                 # Material Details wrapper
                 material_info = MaterialDetails(base, version, original_name)
+                # Use dynamic texture mappings based on shader type
+                texture_mappings = get_texture_mappings(context.scene.shader_type)
                 mat_tex_data = MaterialTextureData(
                     slot.material,
                     material_info,
-                    TEXTURE_TYPE_MAPPINGS,
+                    texture_mappings,
                     self.files,
                     self.directory,
                     data.tex_mode,
+                    context.scene.shader_type,
                 )
 
                 apply_textures(mat_tex_data)
@@ -759,6 +1233,12 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
 
         data.hair_trans = has_het_anywhere
         logger.info(f"Set hair_trans to {has_het_anywhere} for {mesh_name}")
+
+        # Create SEETHRU mesh AFTER textures are applied (so textures can be copied)
+        shader_filepath = context.scene.shader_file_path if hasattr(context.scene, "shader_file_path") else None
+        seethru_obj = create_seethru_mesh(context, active_obj, shader_filepath)
+        if seethru_obj:
+            logger.info(f"SEETHRU mesh created with textures: {seethru_obj.name}")
 
         set_material_view()
         logger.info("Material view set")
@@ -809,7 +1289,7 @@ class WW_OT_ImportTextures(Operator, ImportHelper):
         for file in self.files:
             file_path = os.path.join(self.directory, file.name)
             logger.info(f"Loading texture: {file.name}")
-            loaded_image = load_image(file_path)
+            loaded_image = load_image(file_path, context.scene.shader_type)
             if loaded_image:
                 imported_files.append(file.name)
             else:

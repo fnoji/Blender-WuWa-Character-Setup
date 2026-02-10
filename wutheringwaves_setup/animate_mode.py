@@ -110,14 +110,20 @@ def simplify_material_nodes(low_mat: bpy.types.Material, original_mat: bpy.types
     if original_mat.use_nodes and original_mat.node_tree:
         orig_tree = original_mat.node_tree
         
-        # Check for Fix Eye UV modification (UV2 usage in Eye Depth group)
+        # Check for Fix Eye UV modification (UV2 usage)
         for node in orig_tree.nodes:
+            # JaredNyts style (Eye Depth group)
             if node.type == 'GROUP' and node.node_tree and "Eye Depth" in node.node_tree.name:
                 # Inspect inside the group for UV Map usage
                 for sub_node in node.node_tree.nodes:
                     if sub_node.type == 'UVMAP' and sub_node.uv_map == "UV2":
                         use_uv2 = True
                         break
+            
+            # Jonn style (Top level UV Map node)
+            if node.type == 'UVMAP' and node.uv_map == "UV2":
+                use_uv2 = True
+
             if use_uv2:
                 break
         

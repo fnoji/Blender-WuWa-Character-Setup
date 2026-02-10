@@ -108,7 +108,13 @@ class WW_OT_RunEntireSetup(Operator):
                 # But Rigify might take a moment. 
                 # The operator execution blocks Blender, so next timer tick happens after it's done.
                 try:
-                    bpy.ops.shader.rigify_armature()
+                    result = bpy.ops.shader.rigify_armature()
+                    if result == {'CANCELLED'}:
+                        # Rig generation was skipped (e.g. MB1 non-biped skeleton)
+                        self.report({'WARNING'}, "Rig generation was skipped (non-biped skeleton).")
+                        self.report({'INFO'}, "Run Entire Setup: Completed (rig skipped).")
+                        self.cancel(context)
+                        return {'FINISHED'}
                     self._state = "SETUP_HEAD"
                 except Exception as e:
                     self.report({'ERROR'}, f"Rig generation failed: {e}")

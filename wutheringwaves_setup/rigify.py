@@ -10,7 +10,7 @@ from math import pi, cos, sin
 from collections import defaultdict, deque
 
 # Here we are inside wuwa_add package.
-from .utils import extract_character_name
+from .utils import extract_character_name, get_model_prefix, ALWAYS_BIPED_PREFIXES, BIPED_CHECK_PREFIXES
 
 
 # Global Constants / Configuration
@@ -59,6 +59,27 @@ skip_if_finger13 = {
 ALIGN_THRESHOLD = math.radians(5)
 move_amount = 0.0001
 NEIGHBOR_DEPTH = 4
+
+# Required Biped bones for rig generation — all bones needed by Rigify setup
+REQUIRED_BIPED_BONES = [
+    "Bip001Pelvis", "Bip001Spine", "Bip001Spine1", "Bip001Spine2",
+    "Bip001Neck", "Bip001Head",
+    "Bip001LClavicle", "Bip001RClavicle",
+    "Bip001LUpperArm", "Bip001RUpperArm",
+    "Bip001LForearm", "Bip001RForearm",
+    "Bip001LHand", "Bip001RHand",
+    "Bip001LThigh", "Bip001RThigh",
+    "Bip001LCalf", "Bip001RCalf",
+    "Bip001LFoot", "Bip001RFoot",
+    "Bip001LToe0", "Bip001RToe0",
+    "Bip001LFinger0", "Bip001RFinger0",
+]
+
+
+def is_biped_skeleton(armature) -> bool:
+    """Check if the armature has all required Biped bones for rig generation."""
+    bone_names = {b.name for b in armature.data.bones}
+    return all(name in bone_names for name in REQUIRED_BIPED_BONES)
 
 
 # --- Helper Functions ---
@@ -248,6 +269,27 @@ class WW_OT_Rigify(Operator):
             self.report({'ERROR'}, "Select an armature first.")
             return {'CANCELLED'}
 
+        # --------------- Model Type & Biped Skeleton Validation --------------- #
+        model_prefix = obj.get("ww_model_prefix") or get_model_prefix(obj.name)
+
+        if model_prefix in ALWAYS_BIPED_PREFIXES:
+            pass  # R2T1 / NHT1 / NH_ — always proceed
+        elif model_prefix in BIPED_CHECK_PREFIXES:
+            # MB1 / ML1 / NA_ — only proceed if biped skeleton
+            if not is_biped_skeleton(obj):
+                bone_names = {b.name for b in obj.data.bones}
+                missing = [n for n in REQUIRED_BIPED_BONES if n not in bone_names]
+                self.report({'WARNING'},
+                    "This model does not have a standard Biped skeleton. "
+                    f"Rig generation skipped. Missing bones: {', '.join(missing)}")
+                return {'CANCELLED'}
+        else:
+            # Unknown model type — reject
+            self.report({'WARNING'},
+                f"Unsupported model type (prefix: {model_prefix}). "
+                "Rig generation only supports R2T1/NHT1/NH_/MB1/ML1/NA0/NM0 models.")
+            return {'CANCELLED'}
+
         # --------------- Fix Bone Rotation --------------- #
         bpy.ops.object.mode_set(mode='EDIT')
         edit_bones = obj.data.edit_bones
@@ -370,10 +412,13 @@ class WW_OT_Rigify(Operator):
             ]
 
             for bone1_name, bone2_name in bone_pairs:
-                if bone1_name in armature.data.edit_bones and bone2_name in armature.data.edit_bones:
-                    bone1 = armature.data.edit_bones[bone1_name]
-                    bone2 = armature.data.edit_bones[bone2_name]
-                    bone1.tail = bone2.head
+                try:
+                    if bone1_name in armature.data.edit_bones and bone2_name in armature.data.edit_bones:
+                        bone1 = armature.data.edit_bones[bone1_name]
+                        bone2 = armature.data.edit_bones[bone2_name]
+                        bone1.tail = bone2.head
+                except Exception as e:
+                    print(f"Warning: Failed to connect bones {bone1_name} -> {bone2_name}: {e}")
 
             twist_bones = {
                 'Bip001RForeTwist': 'Bip001RForearm',
@@ -503,20 +548,23 @@ class WW_OT_Rigify(Operator):
             bpy.ops.object.mode_set(mode='EDIT')
 
             def duplicate_and_adjust_heel_bone(foot_bone_name, toe_bone_name, heel_bone_name, rotation_angle=1.5708):
-                if toe_bone_name in armature.data.edit_bones:
-                    toe_bone = armature.data.edit_bones[toe_bone_name]
-                    heel_bone = armature.data.edit_bones.new(name=heel_bone_name)
-                    heel_bone.head = toe_bone.head
-                    heel_bone.tail = toe_bone.tail
-                    heel_bone.roll = toe_bone.roll
-                    rotation_matrix = mathutils.Matrix.Rotation(rotation_angle, 4, 'Y')
-                    heel_bone.tail = heel_bone.head + rotation_matrix @ (heel_bone.tail - heel_bone.head)
-                    if foot_bone_name in armature.data.edit_bones:
-                        foot_bone = armature.data.edit_bones[foot_bone_name]
-                        foot_head_y = foot_bone.head[1]
-                        heel_bone.head[1] = foot_head_y
-                        heel_bone.tail[1] = foot_head_y
-                    heel_bone.parent = armature.data.edit_bones[foot_bone_name]
+                try:
+                    if toe_bone_name in armature.data.edit_bones:
+                        toe_bone = armature.data.edit_bones[toe_bone_name]
+                        heel_bone = armature.data.edit_bones.new(name=heel_bone_name)
+                        heel_bone.head = toe_bone.head
+                        heel_bone.tail = toe_bone.tail
+                        heel_bone.roll = toe_bone.roll
+                        rotation_matrix = mathutils.Matrix.Rotation(rotation_angle, 4, 'Y')
+                        heel_bone.tail = heel_bone.head + rotation_matrix @ (heel_bone.tail - heel_bone.head)
+                        if foot_bone_name in armature.data.edit_bones:
+                            foot_bone = armature.data.edit_bones[foot_bone_name]
+                            foot_head_y = foot_bone.head[1]
+                            heel_bone.head[1] = foot_head_y
+                            heel_bone.tail[1] = foot_head_y
+                        heel_bone.parent = armature.data.edit_bones[foot_bone_name]
+                except Exception as e:
+                    print(f"Warning: Failed to create heel bone {heel_bone_name}: {e}")
 
             duplicate_and_adjust_heel_bone('Bip001LFoot', 'Bip001LToe0', 'Bip001LHeel0', rotation_angle=1.5708)
             duplicate_and_adjust_heel_bone('Bip001RFoot', 'Bip001RToe0', 'Bip001RHeel0', rotation_angle=-1.5708)
@@ -606,7 +654,13 @@ class WW_OT_Rigify(Operator):
                     if isinstance(val, str) and val in final_renames:
                         bone[key] = final_renames[val]
 
-            bpy.ops.pose.rigify_generate()
+            try:
+                bpy.ops.pose.rigify_generate()
+            except RuntimeError as e:
+                self.report({'WARNING'},
+                    f"Rigify generation failed: {e}. "
+                    "This skeleton may not be compatible with Rigify.")
+                return {'CANCELLED'}
 
         # --------------- Post Generation Logic --------------- #
         bpy.ops.object.mode_set(mode='POSE')
@@ -736,6 +790,31 @@ class WW_OT_Rigify(Operator):
                          modifier.object = RigArmatureObj
                  
                  CharacterMesh.parent = RigArmatureObj
+                 
+                 # Handle SEETHRU mesh for Jonn shader (re-parent to new rig)
+                 # Only process if _SEETHRU materials exist (Jonn shader indicator)
+                 character_name = extract_character_name(CharacterMesh.name)
+                 seethru_mesh_name = CharacterMesh.name + "_SEETHRU"
+                 seethru_mesh = bpy.data.objects.get(seethru_mesh_name)
+                 
+                 if seethru_mesh:
+                     print(f"Found SEETHRU mesh: {seethru_mesh_name}, re-parenting to {RigArmature}")
+                     # Re-parent SEETHRU mesh to new rig
+                     seethru_mesh.parent = RigArmatureObj
+                     seethru_mesh.matrix_parent_inverse = RigArmatureObj.matrix_world.inverted()
+                     
+                     # Update Armature modifier to use new rig
+                     for modifier in seethru_mesh.modifiers:
+                         if modifier.type == 'ARMATURE':
+                             modifier.object = RigArmatureObj
+                             print(f"Updated SEETHRU Armature modifier to {RigArmature}")
+                     
+                     # Rename vertex groups to ORG- prefix to match the new rig
+                     for group in seethru_mesh.vertex_groups:
+                         if not group.name.startswith("ORG-"):
+                             group.name = "ORG-" + group.name
+                     
+                     print(f"SEETHRU mesh {seethru_mesh_name} re-parented to {RigArmature}")
 
 
                  # Secondary Shape Keys

@@ -70,33 +70,51 @@ class WW_OT_SetupHeadDriver(Operator):
                 return {"CANCELLED"}
 
         mesh_name = mesh.name.split(".")[0]
-        head_origin, light_direction = self.get_model_specific_objects(
+        head_control, light_control, shader_type = self.get_model_specific_objects(
             mesh, mesh_name)
 
-        if not head_origin or not light_direction:
+        if not head_control or not light_control:
             self.report(
-                {"ERROR"}, "Head Origin or Light Direction not found for this model."
+                {"ERROR"}, "Control objects (Head Origin/Head Controller or Light Direction/Main Light) not found for this model."
             )
             return {"CANCELLED"}
 
-        self.parent_objects(armature, head_origin, light_direction)
+        self.parent_objects(armature, head_control, light_control)
 
-        head_bone = self.reset_head_driver(mesh_name, armature, head_origin)
-        if not head_bone:
+        if shader_type == "JONN":
+            # Jonn shader: head_control is Head Controller, light_control is Main Light
+            head_bone = self.reset_head_controller_jonn(mesh_name, armature, head_control)
+            if not head_bone:
+                self.report(
+                    {"WARNING"},
+                    "Head bone not found. Head Controller may not be properly positioned.",
+                )
+
+            pos_bone = self.reset_main_light_jonn(armature, light_control)
+            if not pos_bone:
+                self.report(
+                    {"WARNING"},
+                    "Position bone not found. Main Light may not be properly positioned.",
+                )
             self.report(
-                {"WARNING"},
-                "Head bone not found. Head Origin may not be properly positioned.",
-            )
+                {"INFO"}, "Head Controller and Main Light set up successfully (Jonn shader).")
+        else:
+            # JaredNyts shader: head_control is Head Origin, light_control is Light Direction
+            head_bone = self.reset_head_driver(mesh_name, armature, head_control)
+            if not head_bone:
+                self.report(
+                    {"WARNING"},
+                    "Head bone not found. Head Origin may not be properly positioned.",
+                )
 
-        pos_bone = self.reset_light_direction(armature, light_direction)
-        if not pos_bone:
+            pos_bone = self.reset_light_direction(armature, light_control)
+            if not pos_bone:
+                self.report(
+                    {"WARNING"},
+                    "Position bone not found. Light Direction may not be properly positioned.",
+                )
             self.report(
-                {"WARNING"},
-                "Position bone not found. Light Direction may not be properly positioned.",
-            )
-
-        self.report(
-            {"INFO"}, "Head Origin and Light Direction set up successfully.")
+                {"INFO"}, "Head Origin and Light Direction set up successfully.")
 
         self.restore_initial_state(context, active_obj)
 
@@ -109,16 +127,28 @@ class WW_OT_SetupHeadDriver(Operator):
         return None
 
     def get_model_specific_objects(self, mesh, mesh_name):
+        """Get control objects for the mesh. Supports both JaredNyts and Jonn shaders."""
+        # Try JaredNyts shader first (Light Vectors modifier)
         modifier = mesh.modifiers.get(f"Light Vectors {mesh_name}")
         if modifier and modifier.type == "NODES":
             light_direction = modifier.get("Input_3")
             head_origin = modifier.get("Input_4")
             if light_direction and head_origin:
-                return head_origin, light_direction
+                return head_origin, light_direction, "JAREDNYTS"
 
+        # Try Jonn shader ([GW] Vectors modifier)
+        jonn_modifier = mesh.modifiers.get("LIGHT VECTOR")
+        if jonn_modifier and jonn_modifier.type == "NODES":
+            main_light = jonn_modifier.get("Input_2")
+            head_controller = jonn_modifier.get("Socket_1")
+            if main_light and head_controller:
+                return head_controller, main_light, "JONN"
+
+        # Fallback: search for objects by name
         head_origin = None
         light_direction = None
 
+        # Try JaredNyts objects
         for obj in bpy.data.objects:
             if obj.name.startswith("Head Origin"):
                 head_origin = obj
@@ -127,8 +157,19 @@ class WW_OT_SetupHeadDriver(Operator):
         if head_origin:
             suffix = head_origin.name[len("Head Origin"):]
             light_direction = bpy.data.objects.get(f"Light Direction{suffix}")
+            if light_direction:
+                return head_origin, light_direction, "JAREDNYTS"
 
-        return head_origin, light_direction
+        # Try Jonn objects
+        for obj in bpy.data.objects:
+            if obj.name.startswith("Head Controller"):
+                head_controller = obj
+                suffix = head_controller.name[len("Head Controller"):]
+                main_light = bpy.data.objects.get(f"Main Light{suffix}")
+                if main_light:
+                    return head_controller, main_light, "JONN"
+
+        return None, None, None
 
     def parent_objects(self, armature, head_origin, light_direction):
         for obj in (head_origin, light_direction):
@@ -215,6 +256,124 @@ class WW_OT_SetupHeadDriver(Operator):
         light_direction.location = bone_world_pos
         light_direction.rotation_euler = (-1.5708, 0, 0)
         return pos_bone
+
+    def reset_head_controller_jonn(self, mesh_name, armature, head_controller):
+        """Reset Head Controller constraint for Jonn shader (similar to reset_head_driver for JaredNyts)."""
+        head_bone_names = ["c_head.x", "Bip001Head", "head"]
+        head_bone = None
+
+        for bone_name in head_bone_names:
+            if bone_name in armature.data.bones:
+                head_bone = bone_name
+                break
+
+        if not head_bone and armature.data.bones:
+            head_bone = armature.data.bones[0].name
+
+        if not head_bone:
+            return None
+
+        # Use existing Child Of constraint or create new one
+        constraint = head_controller.constraints.get("Child Of")
+        if not constraint:
+            # Remove all existing constraints and create fresh
+            for const in head_controller.constraints:
+                head_controller.constraints.remove(const)
+            constraint = head_controller.constraints.new("CHILD_OF")
+            constraint.name = "Child Of"
+
+        constraint.target = armature
+        constraint.subtarget = head_bone
+
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        head_controller.select_set(True)
+        bpy.context.view_layer.objects.active = head_controller
+
+        context_override = {
+            "object": head_controller,
+            "active_object": head_controller,
+            "selected_objects": [head_controller],
+            "selected_editable_objects": [head_controller],
+            "active_editable_object": head_controller,
+            "constraint": constraint,
+        }
+
+        try:
+            with bpy.context.temp_override(**context_override):
+                bpy.ops.constraint.childof_set_inverse(
+                    constraint=constraint.name, owner="OBJECT"
+                )
+        except Exception as e:
+            self.report(
+                {"WARNING"}, f"Failed to set constraint inverse: {str(e)}")
+            try:
+                constraint.inverse_matrix = (
+                    armature.matrix_world.inverted() @ head_controller.matrix_world
+                )
+            except Exception as e2:
+                self.report({"WARNING"}, f"Manual inverse failed: {str(e2)}")
+
+        head_controller.select_set(False)
+        return head_bone
+
+    def reset_main_light_jonn(self, armature, main_light):
+        """Reset Main Light constraint for Jonn shader - targets root bone instead of head."""
+        # Main Light should target root bone, not head
+        root_bone_names = ["root", "Root", "c_pos", "Pelvis"]
+        root_bone = None
+
+        for bone_name in root_bone_names:
+            if bone_name in armature.data.bones:
+                root_bone = bone_name
+                break
+
+        if not root_bone and armature.data.bones:
+            root_bone = armature.data.bones[0].name
+
+        if not root_bone:
+            return None
+
+        # Use existing Child Of constraint or create new one
+        constraint = main_light.constraints.get("Child Of")
+        if not constraint:
+            constraint = main_light.constraints.new("CHILD_OF")
+            constraint.name = "Child Of"
+
+        constraint.target = armature
+        constraint.subtarget = root_bone
+
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        main_light.select_set(True)
+        bpy.context.view_layer.objects.active = main_light
+
+        context_override = {
+            "object": main_light,
+            "active_object": main_light,
+            "selected_objects": [main_light],
+            "selected_editable_objects": [main_light],
+            "active_editable_object": main_light,
+            "constraint": constraint,
+        }
+
+        try:
+            with bpy.context.temp_override(**context_override):
+                bpy.ops.constraint.childof_set_inverse(
+                    constraint=constraint.name, owner="OBJECT"
+                )
+        except Exception as e:
+            self.report(
+                {"WARNING"}, f"Failed to set constraint inverse for Main Light: {str(e)}")
+            try:
+                constraint.inverse_matrix = (
+                    armature.matrix_world.inverted() @ main_light.matrix_world
+                )
+            except Exception as e2:
+                self.report({"WARNING"}, f"Manual inverse failed: {str(e2)}")
+
+        main_light.select_set(False)
+        return root_bone
 
     def restore_initial_state(self, context, active_obj):
         bpy.ops.object.mode_set(mode="OBJECT")

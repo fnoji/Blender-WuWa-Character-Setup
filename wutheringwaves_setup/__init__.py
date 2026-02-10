@@ -28,6 +28,9 @@ from bpy_extras.io_utils import ImportHelper
 from .utils import (
     TEXTURE_TYPE_MAPPINGS,
     LIGHT_MODES,
+    SHADER_TYPE_JAREDNYTS,
+    SHADER_TYPE_JONN,
+    get_texture_mappings,
     get_armature_from_modifiers,
     load_image,
     split_material_name,
@@ -46,6 +49,7 @@ from .utils import (
     darken_eye_colors,
     get_suffix,
     extract_character_name,
+    get_model_prefix,
     get_target_mesh,
 )
 from .import_shader import WW_OT_ImportShader, WW_OT_ImportTextures
@@ -57,7 +61,7 @@ from .animate_mode import set_animate_mode
 bl_info = {
     "name": "WuWa Character Setup",
     "author": "Akatsuki, fnoji",
-    "version": (1, 4, 4),
+    "version": (1, 5, 0),
     "blender": (4, 1, 0),
     "location": "View3D > UI > Wuthering Waves",
     "description": "Import & Setup Wuthering Waves characters",
@@ -69,6 +73,9 @@ bl_info = {
     "license": "GPL-3.0-or-later",
 }
 
+# Version string for GUI display (auto-generated from bl_info)
+_ver = ".".join(str(v) for v in bl_info["version"])
+ADDON_VERSION = f"{_ver} {bl_info['warning']}" if bl_info["warning"] else _ver
 
 
 def update_light(self, context):
@@ -131,13 +138,25 @@ def update_face_shadow_softness(self, context):
         data = context.scene.mesh_texture_mappings.add()
         data.mesh_name = mesh_name
     value = self.face_shadow_softness_value
-    for slot in target_obj.material_slots:
-        if slot.material and slot.material.use_nodes:
-            for node in slot.material.node_tree.nodes:
-                if node.type == "GROUP" and node.node_tree:
-                    for input in node.inputs:
-                        if input.type == "VALUE" and "Face Shadow Softness" in input.name:
-                            input.default_value = value
+    
+    if context.scene.shader_type == SHADER_TYPE_JONN:
+        # Jonn Shader Logic: Target "Group" node input 8 in "WW - Face" material
+        # "WW - Face Luokeke" -> Node "Group" -> Input[8]
+        for slot in target_obj.material_slots:
+            if slot.material and slot.material.use_nodes and "WW - Face" in slot.material.name:
+                for node in slot.material.node_tree.nodes:
+                    if node.name == "Group" and node.type == "GROUP":
+                         if len(node.inputs) > 8:
+                             node.inputs[8].default_value = value
+    else:
+        # JaredNyts Shader Logic
+        for slot in target_obj.material_slots:
+            if slot.material and slot.material.use_nodes:
+                for node in slot.material.node_tree.nodes:
+                    if node.type == "GROUP" and node.node_tree:
+                        for input in node.inputs:
+                            if input.type == "VALUE" and "Face Shadow Softness" in input.name:
+                                input.default_value = value
 
 
 def update_shadow(self, context):
@@ -310,6 +329,15 @@ def add_scene_props():
     Scene.outlines_enabled = BoolProperty(default=False)
     Scene.texture_priority_mode = BoolProperty(default=True)
     Scene.mesh_texture_mappings = CollectionProperty(type=MeshTextureData)
+    Scene.shader_type = bpy.props.EnumProperty(
+        name="Shader Type",
+        description="Select which shader to use for material setup",
+        items=[
+            (SHADER_TYPE_JONN, "Jonn Gathering Wives", "Use Jonn Gathering Wives Shader"),
+            (SHADER_TYPE_JAREDNYTS, "JaredNyts Shader", "Use JaredNyts Shader"),
+        ],
+        default=SHADER_TYPE_JONN,
+    )
     Scene.light_mode_value = IntProperty(
         name="Light Mode",
         description="Select the lighting mode for the character",
@@ -499,6 +527,16 @@ class MeshTextureData(PropertyGroup):
         default=False,
         update=update_animate_mode
     )
+    legacy_shading: BoolProperty(
+        name="Legacy Shading",
+        description="Enable legacy shading for Jonn shader",
+        default=False,
+    )
+    legacy_shading: BoolProperty(
+        name="Legacy Shading",
+        description="Enable legacy shading for Jonn shader",
+        default=False,
+    )
 
 
 class WW_OT_ImportUEModel(Operator):
@@ -583,6 +621,11 @@ class WW_OT_ImportUEModel(Operator):
             # Identify name from object name (which might be messy from import)
             clean_name = extract_character_name(obj.name)
             
+            # Store the original model prefix as custom property (before rename loses it)
+            prefix = get_model_prefix(obj.name)
+            if prefix and obj.type == 'ARMATURE':
+                obj["ww_model_prefix"] = prefix
+
             target_name = clean_name
             if obj.type == 'ARMATURE':
                 # Avoid RIG- prefix at import stage as per user request
@@ -814,13 +857,18 @@ class WW_OT_ToggleTexMode(Operator):
                 None,
             )
             material_info = MaterialDetails(base, version, original_name)
+            
+            # Use dynamic mapping based on current shader type
+            mappings = get_texture_mappings(context.scene.shader_type)
+            
             mat_tex_data = MaterialTextureData(
                 slot.material,
                 material_info,
-                TEXTURE_TYPE_MAPPINGS,
+                mappings,
                 textures,
                 context.scene.tex_dir,
                 tex_mode,
+                context.scene.shader_type,
             )
             apply_textures(mat_tex_data)
             assigned_count += 1
@@ -834,16 +882,30 @@ class WW_OT_ToggleOutlines(Operator):
     bl_description = "Toggle visibility of character outline effects"
     bl_options = {"REGISTER", "UNDO"}
 
+
+
     def execute(self, context):
         context.scene.outlines_enabled = not context.scene.outlines_enabled
         toggled_count = 0
-        for obj in (o for o in bpy.data.objects if o.type == "MESH"):
-            for modifier in obj.modifiers:
-                if "outlines" in modifier.name.lower():
-                    if modifier.type == "NODES":
-                        modifier.show_viewport = context.scene.outlines_enabled
-                        toggled_count += 1
+        is_jonn = context.scene.shader_type == SHADER_TYPE_JONN
 
+        for obj in (o for o in bpy.data.objects if o.type == "MESH"):
+            # Jonn Mode Logic
+            if is_jonn:
+                modifier = obj.modifiers.get("OUTLINE")
+                if modifier:
+                     modifier.show_viewport = context.scene.outlines_enabled
+                     toggled_count += 1
+            
+            # JaredNyts / General Logic (look for "outlines" in name)
+            # Keeping original logic as fallback or for JaredNyts mode
+            else:
+                for modifier in obj.modifiers:
+                    if "outlines" in modifier.name.lower():
+                        if modifier.type == "NODES":
+                            modifier.show_viewport = context.scene.outlines_enabled
+                            toggled_count += 1
+        
         state = "on" if context.scene.outlines_enabled else "off"
         self.report(
             {"INFO"}, f"Outlines turned {state} for {toggled_count} objects.")
@@ -911,7 +973,11 @@ class WW_OT_ToggleHairTrans(Operator):
         data = get_mesh_data(context, mesh_name)
         data.hair_trans = not data.hair_trans
 
-        self.update_hair_transparency(context, data.hair_trans)
+        if context.scene.shader_type == SHADER_TYPE_JONN:
+            self.update_hair_transparency_jonn(context, data.hair_trans)
+        else:
+            self.update_hair_transparency(context, data.hair_trans)
+            
         state = "on" if data.hair_trans else "off"
         self.report(
             {"INFO"}, f"Transparent hair turned {state} for mesh {mesh_name}.")
@@ -928,6 +994,32 @@ class WW_OT_ToggleHairTrans(Operator):
                 for node in slot.material.node_tree.nodes:
                     if node.type == "GROUP" and node.node_tree and "See Through" in node.node_tree.name:
                         node.mute = not hair_trans
+
+    def update_hair_transparency_jonn(self, context, hair_trans):
+        # Toggle visibility of _SEETHRU meshes
+        # Look for objects ending with _SEETHRU
+        # Ideally we should narrow down to the character's seethru mesh
+        # But for now, toggle all or just the one associated with current mesh?
+        # Current mesh logic usually relies on name prefix.
+        
+        target_obj = get_target_mesh(context)
+        if not target_obj:
+            return
+
+        # Assuming SEETHRU object name is {Object_Name}_SEETHRU
+        # But object name might have changed.
+        # Let's search for objects with _SEETHRU suffix.
+        # Or better, assume we are on the main mesh, locate the SEETHRU counterpart.
+        
+        # Strategy: Search all objects. If match {mesh_name}_SEETHRU, toggle.
+        mesh_name = target_obj.name.split(".")[0]
+        # Regex or direct check
+        for obj in bpy.data.objects:
+            if obj.type == 'MESH' and "_SEETHRU" in obj.name:
+                 # Check if it belongs to this character (simple check: starts with mesh_name or part of it)
+                 if mesh_name in obj.name:
+                     obj.hide_viewport = not hair_trans
+
 
 
 class WW_OT_FixEyeUV(Operator):
@@ -962,6 +1054,90 @@ class WW_OT_FixEyeUV(Operator):
         if not target_obj:
             return 0
             
+        # Strategy: Identify all meshes belonging to this character (Main + SEETHRU)
+        # 1. Clean the name to find a common base (remove _SEETHRU, .001 etc)
+        name_base = target_obj.name.split(".")[0]
+        if name_base.endswith("_SEETHRU"):
+            name_base = name_base[:-8]
+            
+        # 2. Find all meshes that seem to be part of this character
+        # We look for meshes that start with the base name
+        character_meshes = []
+        for obj in bpy.data.objects:
+            if obj.type == 'MESH':
+                obj_name_clean = obj.name.split(".")[0]
+                if obj_name_clean == name_base or obj_name_clean == f"{name_base}_SEETHRU":
+                    character_meshes.append(obj)
+        
+        # If no others found (unlikely if simple logic), just use target
+        if not character_meshes:
+            character_meshes = [target_obj]
+
+        if context.scene.shader_type == SHADER_TYPE_JONN:
+            # Jonn Shader Logic
+            # Collect unique materials
+            unique_materials = set()
+            for obj in character_meshes:
+                for slot in obj.material_slots:
+                    if slot.material and ("WW - Eye" in slot.material.name or "WW - Eye_SEETHRU" in slot.material.name):
+                        unique_materials.add(slot.material)
+            
+            # 1. Update UV Map node
+            for material in unique_materials:
+                if not material.use_nodes:
+                    continue
+                # Look for "UV Map" node by name
+                uv_node = material.node_tree.nodes.get("UV Map")
+                if uv_node:
+                    uv_node.uv_map = "UV2"
+                    fixed_count += 1
+            
+            # 2. Update Gathering Wives [Eye] node settings
+            for material in unique_materials:
+                 if not material.use_nodes: continue
+                 for node in material.node_tree.nodes:
+                     if node.type == "GROUP" and node.node_tree and "Gathering Wives [Eye]" in node.node_tree.name:
+                         # Heuristic: Match inputs by name substring
+                         
+                         px = [i for i in node.inputs if "PositionX" in i.name]
+                         py = [i for i in node.inputs if "PositionY" in i.name]
+                         wx = [i for i in node.inputs if "WidthX" in i.name]
+                         wy = [i for i in node.inputs if "WidthY" in i.name]
+                         sc = [i for i in node.inputs if "Scale" in i.name]
+                         rot = [i for i in node.inputs if "Rotate" in i.name]
+                         
+                         # First Highlight (Index 0)
+                         if len(px) > 0: px[0].default_value = 0.350
+                         if len(py) > 0: py[0].default_value = -0.060
+                         if len(wx) > 0: wx[0].default_value = -0.100
+                         if len(wy) > 0: wy[0].default_value = -0.150
+                         if len(sc) > 0: sc[0].default_value = -1.300
+                         if len(rot) > 0: rot[0].default_value = 0.000
+                         
+                         # Second Highlight (Index 1)
+                         if len(px) > 1: px[1].default_value = -0.150
+                         if len(py) > 1: py[1].default_value = -0.060
+                         if len(wx) > 1: wx[1].default_value = -0.100
+                         if len(wy) > 1: wy[1].default_value = -0.150
+                         if len(sc) > 1: sc[1].default_value = -1.300
+                         if len(rot) > 1: rot[1].default_value = 0.000
+
+                         # Eye Highlight ID (Index 5 and 12, or Name "Eye Highlight ID")
+                         # Try search by name first
+                         h_ids = [i for i in node.inputs if "Eye Highlight ID" in i.name]
+                         if h_ids:
+                             for h_id in h_ids:
+                                 h_id.default_value = 1
+                         else:
+                             # Fallback to explicit indices 5 and 12 if name not found
+                             if len(node.inputs) > 5:
+                                 node.inputs[5].default_value = 1
+                             if len(node.inputs) > 12:
+                                 node.inputs[12].default_value = 1
+            
+            return fixed_count
+
+        # JaredNyts Shader Logic (Default)
         eye_materials = [
             slot.material
             for slot in target_obj.material_slots
@@ -1175,12 +1351,17 @@ class VIEW3D_PT_WutheringWaves(Panel):
         # Version Label (Created BEFORE operator row so it appears above)
         ver_row = layout.row()
         ver_row.alignment = 'CENTER'
-        ver_row.label(text="Version : 1.4.4")
+        ver_row.label(text=f"Version : {ADDON_VERSION}")
 
         # Run Operator
         row = layout.row()
         row.scale_y = 1.5
         row.operator("shader.run_entire_setup", text="Run Entire Setup", icon="PLAY")
+
+        # Shader Type Selector (NEW)
+        box = layout.box()
+        box.label(text="Shader Type", icon="SHADING_RENDERED")
+        box.prop(context.scene, "shader_type", text="")
 
         # Warning for missing UEFormat
         if not self.is_ue_format_enabled():
@@ -1235,9 +1416,34 @@ class VIEW3D_PT_WutheringWaves(Panel):
         col = box.column(align=True)
         col.operator("shader.set_performance", icon="SHADING_RENDERED")
         col.operator("shader.set_quality", icon="MATERIAL")
-        col.prop(data if data else context.scene, "blush_value", text="Blush")
-        col.prop(data if data else context.scene,
+
+        col.separator()
+        
+        # Disable Blush/Disgust for Jonn mode
+        is_jonn = context.scene.shader_type == SHADER_TYPE_JONN
+        
+        row = col.row()
+        row.prop(data if data else context.scene, "blush_value", text="Blush")
+        row.enabled = not is_jonn
+        
+        row = col.row()
+        row.prop(data if data else context.scene,
                  "disgust_value", text="Disgust")
+        row.enabled = not is_jonn
+
+        # Animate Mode (Moved from Appearance)
+        box = layout.box()
+        box.label(text="Animate Mode", icon="ACTION")
+        
+        col = box.column(align=True)
+        if data:
+            icon = "CHECKBOX_HLT" if data.animate_mode else "CHECKBOX_DEHLT"
+            text = "Animate Mode: ON" if data.animate_mode else "Animate Mode: OFF"
+            col.prop(data, "animate_mode", text=text, icon=icon, toggle=True)
+        else:
+             col.label(text="Select a WuWa mesh to enable Animate Mode")
+
+
 
     def is_ue_format_enabled(self):
         # Method 1: Check standard addon_utils which is robust for enabled state
@@ -1291,21 +1497,6 @@ class VIEW3D_PT_WutheringWaves_Appearance(Panel):
 
         box = layout.box()
         row = box.row()
-        row.label(text="Animate Mode", icon="ACTION") # New Section
-        
-        col = box.column(align=True)
-        # Display as a big toggle button? Or simple prop?
-        # Prop usually shows as checkbox. Use operator-like toggle look using prop
-        if data:
-            icon = "CHECKBOX_HLT" if data.animate_mode else "CHECKBOX_DEHLT"
-            text = "Animate Mode: ON" if data.animate_mode else "Animate Mode: OFF"
-            col.prop(data, "animate_mode", text=text, icon=icon, toggle=True)
-        else:
-             col.label(text="Select a WuWa mesh to enable Animate Mode")
-
-
-        box = layout.box()
-        row = box.row()
         row.label(text="Material Settings", icon="MATERIAL")
         if data and data.animate_mode:
             row.enabled = False
@@ -1314,14 +1505,26 @@ class VIEW3D_PT_WutheringWaves_Appearance(Panel):
         if data and data.animate_mode:
             col.enabled = False
             
-        col.prop(
-            data if data else context.scene, "metallic_value", text="Enable Metallics"
-        )
-        col.prop(
-            data if data else context.scene,
-            "specular_value",
-            text="Specular Multiplier",
-        )
+        if context.scene.shader_type == SHADER_TYPE_JONN:
+             # Jonn Mode
+             # Show Legacy Shading toggle
+            legacy_state = "On" if data and data.legacy_shading else "Off"
+            col.operator(
+                "shader.toggle_legacy_shading",
+                text=f"Legacy Shading: {legacy_state}",
+                icon="SHADING_RENDERED",
+            )
+             
+        else:
+            # JaredNyts Mode (Default)
+            col.prop(
+                data if data else context.scene, "metallic_value", text="Enable Metallics"
+            )
+            col.prop(
+                data if data else context.scene,
+                "specular_value",
+                text="Specular Multiplier",
+            )
 
         box = layout.box()
         row = box.row()
@@ -1398,12 +1601,19 @@ class VIEW3D_PT_WutheringWaves_Light(Panel):
         mode_row.label(text=f"{mode_name}")
 
         col = box.column(align=True)
-        col.prop(context.scene, "shadow_transition_range_value",
-                 text="Shadow Range")
+        
+        is_jonn = context.scene.shader_type == SHADER_TYPE_JONN
+        
+        if not is_jonn:
+            col.prop(context.scene, "shadow_transition_range_value",
+                     text="Shadow Range")
+                     
         col.prop(context.scene, "face_shadow_softness_value",
                  text="Face Softness")
-        col.prop(context.scene, "shadow_position", text="Shadow Position")
-        col.prop(context.scene, "catch_shadows", text="Catch Shadows")
+                 
+        if not is_jonn:
+            col.prop(context.scene, "shadow_position", text="Shadow Position")
+            col.prop(context.scene, "catch_shadows", text="Catch Shadows")
 
         if context.scene.light_mode_value == 6:
             box = layout.box()
@@ -1412,7 +1622,10 @@ class VIEW3D_PT_WutheringWaves_Light(Panel):
 
             col = box.column(align=True)
             col.prop(context.scene, "amb_color", text="Ambient")
-            col.prop(context.scene, "light_color", text="Light")
+            
+            if not is_jonn:
+                col.prop(context.scene, "light_color", text="Light")
+            
             col.prop(context.scene, "shadow_color", text="Shadow")
             col.prop(context.scene, "rim_color", text="Rim Tint")
 
@@ -1443,6 +1656,64 @@ class VIEW3D_PT_WutheringWaves_Tools(Panel):
         # col.operator("shader.set_optimize", icon="OUTLINER_OB_ARMATURE")
 
 
+class WW_OT_ToggleLegacyShading(Operator):
+    bl_idname = "shader.toggle_legacy_shading"
+    bl_label = "Toggle Legacy Shading"
+    bl_description = "Toggle legacy shading logic for Jonn shader"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        target_obj = get_target_mesh(context)
+        if not target_obj:
+            self.report({"ERROR"}, "Please select a mesh.")
+            return {"CANCELLED"}
+
+        mesh_name = target_obj.name.split(".")[0]
+        data = get_mesh_data(context, mesh_name)
+        data.legacy_shading = not data.legacy_shading
+        
+        # Apply logic
+        if node_group := bpy.data.node_groups.get("Global Material Properties"):
+             for node in node_group.nodes:
+                if node.name == "Global Properties":
+                    # inputs[1] = 0 if ON, 1 if OFF
+                    node.inputs[1].default_value = 0 if data.legacy_shading else 1
+
+        state = "on" if data.legacy_shading else "off"
+        self.report({"INFO"}, f"Legacy Shading turned {state}")
+        return {"FINISHED"}
+
+
+class WW_OT_ToggleLegacyShading(Operator):
+    bl_idname = "shader.toggle_legacy_shading"
+    bl_label = "Toggle Legacy Shading"
+    bl_description = "Toggle legacy shading logic for Jonn shader"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        target_obj = get_target_mesh(context)
+        if not target_obj:
+            self.report({"ERROR"}, "Please select a mesh.")
+            return {"CANCELLED"}
+
+        mesh_name = target_obj.name.split(".")[0]
+        data = get_mesh_data(context, mesh_name)
+        data.legacy_shading = not data.legacy_shading
+        
+        # Apply logic
+        if node_group := bpy.data.node_groups.get("Global Material Properties"):
+             for node in node_group.nodes:
+                if node.name == "Global Properties":
+                    # inputs[1]
+                    # ON (True) -> 0
+                    # OFF (False) -> 1 
+                    node.inputs[1].default_value = 0 if data.legacy_shading else 1
+
+        state = "on" if data.legacy_shading else "off"
+        self.report({"INFO"}, f"Legacy Shading turned {state}")
+        return {"FINISHED"}
+
+
 classes = [
     MeshTextureData,
     WW_OT_RunEntireSetup,
@@ -1463,6 +1734,7 @@ classes = [
     WW_OT_FixEyeUV,
     WW_OT_SeparateMesh,
     WW_OT_SetOptimize,
+    WW_OT_ToggleLegacyShading,
 
     VIEW3D_PT_WutheringWaves,
     VIEW3D_PT_WutheringWaves_Appearance,
@@ -1483,6 +1755,7 @@ def unregister():
         bpy.utils.unregister_class(cls)
 
     for prop in [
+        "shader_type",
         "rim_color",
         "shadow_color",
         "light_color",

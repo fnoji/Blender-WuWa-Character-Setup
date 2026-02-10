@@ -9,7 +9,8 @@
 It automates the entire process of importing Wuthering Waves character UEmodels into Blender, setting up shading, and rigging. It provides automatic shading setup, rigging with Rigify, and facial expression control setups.
 
 This addon was developed by user Akatsuki on Discord. Since I joined as a maintainer from version 1.4, we are publishing it on GitHub starting from the initial version.
-The shader used is the [shader optimized for Wuthering Waves models](https://discord.com/channels/894925535870865498/1213552094678614038/1272958039221338114) created by JaredNyts.
+The supported shaders are the [shader optimized for Wuthering Waves models](https://discord.com/channels/894925535870865498/1213552094678614038/1272958039221338114) created by JaredNyts, and the [shader optimized for Wuthering Waves 3.0+ models](https://discord.com/channels/894925535870865498/1454938172604551383) created by Jonn.
+For the Jonn shader, I have compiled a shader material Blend file ready for import, which is available [here](https://github.com/fnoji/Blender-WuWa-Jonn-Shader).
 The original scripts for the rig and face rig were [created by Scheinze](https://discord.com/channels/894925535870865498/1320434868806615122/1320434868806615122), and I have optimized them from the final version.
 The references used for the face panel were [created by Micchi](https://discord.com/channels/894925535870865498/1216442545782132746/1216442545782132746).
 

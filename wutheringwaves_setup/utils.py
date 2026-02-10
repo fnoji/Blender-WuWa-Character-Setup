@@ -26,7 +26,12 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.propagate = False
 
-TEXTURE_TYPE_MAPPINGS = {
+# Shader Type Constants
+SHADER_TYPE_JAREDNYTS = "JAREDNYTS"
+SHADER_TYPE_JONN = "JONN_GATHERING"
+
+# JaredNyts Shader Texture Mappings (default)
+TEXTURE_TYPE_MAPPINGS_JAREDNYTS = {
     "_D": (
         "Base Color",
         "Bangs Diffuse",
@@ -42,6 +47,46 @@ TEXTURE_TYPE_MAPPINGS = {
     "_HET": ("Eye HET", "Face HET"),
     "_ID": ("Mask ID",),
 }
+
+# Jonn Gathering Wives Shader Texture Mappings
+# Maps texture file suffix to actual Image Texture node names in the materials
+TEXTURE_TYPE_MAPPINGS_JONN = {
+    "_D": (
+        "Base Color",        # WW - Main (Body)
+        "Face Diffuse",      # WW - Face
+        "Eye Diffuse",       # WW - Eye
+        "Hair Diffuse",      # WW - Hair
+        "Bangs Diffuse",     # WW - Bangs
+    ),
+    "_N": ("Normal Map",),
+    "_FTM": ("FTM",),
+    "_LD": (
+        "LD",           # WW - Main (Body)
+        "Bangs LD",     # WW - Hair/Bangs (node shares name)
+    ),
+    "_HM": (
+        "Hair HM",      # WW - Hair
+        "Bangs HM",     # WW - Bangs
+    ),
+    "_HET": (
+        "Eye HET",      # WW - Eye
+        "Face HET",     # WW - Face
+    ),
+    "_ID": ("Mask ID",),
+    "_RGID": ("Mask RGID",),  # RGID uses dedicated RGID node
+    "_Skin": ("Skin",),
+}
+
+# Alias for backward compatibility
+TEXTURE_TYPE_MAPPINGS = TEXTURE_TYPE_MAPPINGS_JAREDNYTS
+
+
+def get_texture_mappings(shader_type: str) -> dict:
+    """Returns the appropriate texture mappings for the given shader type."""
+    if shader_type == SHADER_TYPE_JONN:
+        return TEXTURE_TYPE_MAPPINGS_JONN
+    return TEXTURE_TYPE_MAPPINGS_JAREDNYTS
+
 
 LIGHT_MODES = {
     0: "Default",
@@ -69,6 +114,7 @@ MaterialTextureData = namedtuple(
         "textures",
         "tex_dir",
         "tex_mode",
+        "shader_type",
     ],
 )
 
@@ -114,14 +160,30 @@ def get_target_mesh(context) -> Optional[bpy.types.Object]:
     return None
 
 
-def load_image(path: str) -> Optional[bpy.types.Image]:
+def load_image(path: str, shader_type: str = SHADER_TYPE_JAREDNYTS) -> Optional[bpy.types.Image]:
     try:
         img = bpy.data.images.get(os.path.basename(path))
         if not img:
             logger.info(f"Loading texture: {os.path.basename(path)}")
             img = bpy.data.images.load(path)
             img.alpha_mode = "CHANNEL_PACKED"
-            img.colorspace_settings.name = "sRGB" if "_D" in path else "Non-Color"
+            
+            # Color Space Logic
+            if shader_type == SHADER_TYPE_JONN:
+                # Jonn Mode: _D, _Skin, _ID, _RGID, _HM, _LD are sRGB
+                needs_srgb = (
+                    "_D" in path 
+                    or "_Skin" in path 
+                    or "_ID" in path 
+                    or "_RGID" in path
+                    or "_HM" in path
+                    or "_LD" in path
+                )
+            else:
+                # JaredNyts Mode: _D, _Skin are sRGB. _ID is Non-Color.
+                needs_srgb = "_D" in path or "_Skin" in path
+
+            img.colorspace_settings.name = "sRGB" if needs_srgb else "Non-Color"
         return img
     except Exception as e:
         logger.error(f"Failed to load texture image {path}: {str(e)}")
@@ -144,13 +206,13 @@ def find_texture_node(
 
 
 def find_texture(
-    textures: List[Any], patterns: List[str], tex_dir: str
+    textures: List[Any], patterns: List[str], tex_dir: str, shader_type: str = SHADER_TYPE_JAREDNYTS
 ) -> Optional[bpy.types.Image]:
     for pattern in patterns:
         for file in textures:
             fname = file.name if hasattr(file, "name") else file
             if re.match(pattern, fname):
-                return load_image(os.path.join(tex_dir, fname))
+                return load_image(os.path.join(tex_dir, fname), shader_type)
     return None
 
 
@@ -208,6 +270,15 @@ def darken_eye_colors(mesh: bpy.types.Object):
 
 
 def split_material_name(mat_name: str) -> Tuple[str, str]:
+    # Strip _SEETHRU suffix for base name extraction (texture import compatibility)
+    if mat_name.endswith("_SEETHRU"):
+        mat_name = mat_name[:-8]
+    elif " " in mat_name and mat_name.split(" ")[0].endswith("_SEETHRU"):
+        # Handle "WW - Face_SEETHRU Changli" -> "WW - Face Changli"
+        parts_space = mat_name.split(" ")
+        parts_space[0] = parts_space[0][:-8]  # Remove _SEETHRU from first part
+        mat_name = " ".join(parts_space)
+    
     parts = mat_name.split("_", 2)
     if len(parts) < 2:
         return "", ""
@@ -290,8 +361,14 @@ def set_material_view():
 
 
 def get_suffix():
-    base_objects = [
-        o for o in bpy.data.objects if o.name.startswith("Light Direction")]
+    """Get suffix for control objects. Supports JaredNyts and Jonn shaders."""
+    # Check for JaredNyts objects first
+    jarednyts_objects = [o for o in bpy.data.objects if o.name.startswith("Light Direction")]
+    # Check for Jonn objects
+    jonn_objects = [o for o in bpy.data.objects if o.name.startswith("Main Light")]
+    
+    base_objects = jarednyts_objects if jarednyts_objects else jonn_objects
+    
     return (
         "." + base_objects[-1].name.split(".")[-1]
         if len(base_objects) > 1 and "." in base_objects[-1].name
@@ -301,6 +378,15 @@ def get_suffix():
 
 def make_texture_patterns(params: TextureSearchParameters):
     patterns = []
+    
+    # Special handling for shared textures like Skin
+    # These textures are typically named generically without material-specific prefixes
+    if params.suffix == "_Skin":
+        # Add generic Skin patterns first
+        patterns.append("T_.*?Skin")
+        patterns.append("Texture_Skin")
+        patterns.append(".*Skin")  # Very loose match as fallback
+        return patterns
     
     # NPC support: Add patterns for NpcBody etc.
     # If base_part is Npc, we want T_NpcBody_D.png etc. 
@@ -436,6 +522,8 @@ def make_texture_patterns(params: TextureSearchParameters):
 
 def apply_textures(mat_tex_data: MaterialTextureData):
     has_mask_id = False
+    shader_type = mat_tex_data.shader_type
+    
     for suffix, nodes in mat_tex_data.texture_suffixes.items():
         params = TextureSearchParameters(
             mat_tex_data.material_info.base_part,
@@ -446,22 +534,74 @@ def apply_textures(mat_tex_data: MaterialTextureData):
         )
         patterns = make_texture_patterns(params)
         img = find_texture(mat_tex_data.textures,
-                           patterns, mat_tex_data.tex_dir)
+                           patterns, mat_tex_data.tex_dir, shader_type)
+        
+        # JaredNyts Mode: _FTM Fallback for _ID
+        if not img and suffix == "_ID" and shader_type == SHADER_TYPE_JAREDNYTS:
+             # Try finding _FTM
+             ftm_params = TextureSearchParameters(
+                mat_tex_data.material_info.base_part,
+                mat_tex_data.material_info.version,
+                "_FTM",
+                mat_tex_data.material_info.original_name,
+                mat_tex_data.tex_mode,
+            )
+             ftm_patterns = make_texture_patterns(ftm_params)
+             # _FTM is Non-Color in JaredNyts
+             img = find_texture(mat_tex_data.textures, ftm_patterns, mat_tex_data.tex_dir, shader_type)
+             # If found, it will be assigned to 'nodes' which are the _ID slots (Mask ID)
+        
         if img:
             set_texture(mat_tex_data.material, img, nodes)
             if suffix == "_ID":
                 has_mask_id = True
+            
+            # Jonn Mode: RGID Switch
+            if suffix == "_RGID" and shader_type == SHADER_TYPE_JONN:
+                # Find "Group" node and set input[3] to 1.0
+                if mat_tex_data.material.node_tree:
+                    for node in mat_tex_data.material.node_tree.nodes:
+                        if node.name == "Group" and node.type == "GROUP":
+                            if len(node.inputs) > 3:
+                                node.inputs[3].default_value = 1.0
+
     set_node_input(mat_tex_data.material, "Use ID Color",
                    1.0 if has_mask_id else 0.0)
+
+
+# Supported model prefixes — order matters for matching
+_MODEL_PREFIX_PATTERNS = [
+    ("R2T1", re.compile(r"^R2T1")),
+    ("NHT1", re.compile(r"^NHT1")),
+    ("NH_",  re.compile(r"^NH_")),
+    ("MB1",  re.compile(r"^MB1")),
+    ("ML1",  re.compile(r"^ML1")),
+    ("NA0",  re.compile(r"^NA0")),
+    ("NM0",  re.compile(r"^NM0")),
+]
+
+# Prefixes that always have Biped skeletons (human characters/NPCs)
+ALWAYS_BIPED_PREFIXES = {"R2T1", "NHT1", "NH_"}
+# Prefixes that require a Biped check before rig generation
+BIPED_CHECK_PREFIXES = {"MB1", "ML1", "NA0", "NM0"}
+
+
+def get_model_prefix(name: str) -> Optional[str]:
+    """Return the model prefix (R2T1/NHT1/NH_/MB1/ML1/NA0/NM0) or None if unknown."""
+    if name.endswith("_Skeleton"):
+        name = name[:-9]
+    for prefix, pattern in _MODEL_PREFIX_PATTERNS:
+        if pattern.match(name):
+            return prefix
+    return None
 
 
 def extract_character_name(name: str, title_case: bool = True) -> str:
     """
     Extracts the character name from the asset name.
     Example: R2T1ChangLiMd10011_LOD0 -> Changli (if title_case=True) or ChangLi
-    Now supports NH / NHT1 prefixes for NPCs.
+    Supports R2T1 / NHT1 / NH_ / MB1 / ML1 / NA0 / NM0 prefixes.
     """
-    # Remove _Skeleton suffix if present
     # Remove _Skeleton suffix if present
     if name.endswith("_Skeleton"):
         name = name[:-9] 
@@ -471,17 +611,34 @@ def extract_character_name(name: str, title_case: bool = True) -> str:
         extracted = match.group(1)
         return extracted.title() if title_case else extracted
     
+    # MB1 (Monster/Boss format with Md ID)
+    # Example: MB1FuludelisiMd00411_LOD0 -> Fuludelisi
+    if match := re.search(r"MB1(.+?)Md\d+(?:_\w+)?_LOD\d+", name):
+        extracted = match.group(1)
+        return extracted.title() if title_case else extracted
+
+    # ML1 (Lord format with Md ID, may have _Body_ before LOD)
+    # Example: ML1FerLianMd00201_Body_LOD0 -> Ferlian
+    if match := re.search(r"ML1(.+?)Md\d+(?:_\w+)?_LOD\d+", name):
+        extracted = match.group(1)
+        return extracted.title() if title_case else extracted
+
+    # NA0 / NM0 (Animal format)
+    # Example: NA010_LOD0 -> Na010, NM0Xxx_LOD0 -> Nm0Xxx
+    if match := re.search(r"((?:NA0|NM0).+?)_LOD\d+", name):
+        extracted = match.group(1)
+        return extracted.title() if title_case else extracted
+
     # NHT1 (NPC format without Md ID)
-    # Example: NHT1KamolaJingzhong_LOD0 -> KamolaJingzhong
     if match := re.search(r"NHT1(.+?)_LOD\d+", name):
         extracted = match.group(1)
         return extracted.title() if title_case else extracted
 
     # NH_ (Generic NPC format)
-    # Example: NH_FemaleMS_003_LOD0 -> FemaleMS_003
     if match := re.search(r"NH_(.+?)_LOD\d+", name):
         extracted = match.group(1)
         return extracted.title() if title_case else extracted
     
     # Fallback/Pass-through if no match
     return name
+
