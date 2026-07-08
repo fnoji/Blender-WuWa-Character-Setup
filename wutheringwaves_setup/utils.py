@@ -44,8 +44,12 @@ TEXTURE_TYPE_MAPPINGS_JAREDNYTS = {
     ),
     "_N": ("Normal Map",),
     "_HM": ("Hair HM", "Bangs HM", "Normal Map"),
+    "_HN": ("Hair HN", "Bangs HN"),
+    "_FTM": ("FTM",),
     "_HET": ("Eye HET", "Face HET"),
     "_ID": ("Mask ID",),
+    "_RGID": ("RGID",),
+    "_FX": ("FX Texture",),
 }
 
 # Jonn Gathering Wives Shader Texture Mappings
@@ -536,21 +540,6 @@ def apply_textures(mat_tex_data: MaterialTextureData):
         img = find_texture(mat_tex_data.textures,
                            patterns, mat_tex_data.tex_dir, shader_type)
         
-        # JaredNyts Mode: _FTM Fallback for _ID
-        if not img and suffix == "_ID" and shader_type == SHADER_TYPE_JAREDNYTS:
-             # Try finding _FTM
-             ftm_params = TextureSearchParameters(
-                mat_tex_data.material_info.base_part,
-                mat_tex_data.material_info.version,
-                "_FTM",
-                mat_tex_data.material_info.original_name,
-                mat_tex_data.tex_mode,
-            )
-             ftm_patterns = make_texture_patterns(ftm_params)
-             # _FTM is Non-Color in JaredNyts
-             img = find_texture(mat_tex_data.textures, ftm_patterns, mat_tex_data.tex_dir, shader_type)
-             # If found, it will be assigned to 'nodes' which are the _ID slots (Mask ID)
-        
         if img:
             set_texture(mat_tex_data.material, img, nodes)
             if suffix == "_ID":
@@ -564,6 +553,14 @@ def apply_textures(mat_tex_data: MaterialTextureData):
                         if node.name == "Group" and node.type == "GROUP":
                             if len(node.inputs) > 3:
                                 node.inputs[3].default_value = 1.0
+
+            # JaredNyts Mode: Enable "Use New Shading" global switch
+            if suffix == "_RGID" and shader_type == SHADER_TYPE_JAREDNYTS:
+                node_group = bpy.data.node_groups.get("Global Material Properties Main")
+                if node_group:
+                    global_props_node = node_group.nodes.get("Global Properties")
+                    if global_props_node and len(global_props_node.inputs) > 0:
+                        global_props_node.inputs[0].default_value = True
 
     set_node_input(mat_tex_data.material, "Use ID Color",
                    1.0 if has_mask_id else 0.0)
