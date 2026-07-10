@@ -43,7 +43,7 @@ TEXTURE_TYPE_MAPPINGS_JAREDNYTS = {
         "NPC Diffuse",
     ),
     "_N": ("Normal Map",),
-    "_HM": ("Hair HM", "Bangs HM", "Normal Map"),
+    "_HM": ("Hair HM", "Bangs HM"),
     "_HN": ("Hair HN", "Bangs HN"),
     "_FTM": ("FTM",),
     "_HET": ("Eye HET", "Face HET"),
@@ -638,4 +638,3 @@ def extract_character_name(name: str, title_case: bool = True) -> str:
     
     # Fallback/Pass-through if no match
     return name
-
