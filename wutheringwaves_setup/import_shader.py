@@ -186,13 +186,7 @@ def set_modifiers(ctx, mesh_name: str, suffix: str):
                     modifier[input_name] = obj
 
         elif base_name == "WW - Outlines":
-            outline_mat_name = f"WW - Outlines {mesh_name}"
-            outline_mat = (
-                bpy.data.materials.get(outline_mat_name)
-                or bpy.data.materials.get("WW - Outlines").copy()
-            )
-            outline_mat.name = outline_mat_name
-
+            
             modifier["Input_3_use_attribute"] = True
             modifier["Input_3_attribute_name"] = "COL0"
             modifier["Input_7"] = 0.125
@@ -214,10 +208,24 @@ def set_modifiers(ctx, mesh_name: str, suffix: str):
                 (28, 29),
             ]
             for i, (mask, mat) in enumerate(input_pairs):
-                modifier[f"Input_{mask}"] = materials[i] if i < len(
-                    materials) else None
-                modifier[f"Input_{mat}"] = outline_mat if i < len(
-                    materials) else None
+                if i < len(materials):
+                    source_mat = materials[i]
+
+                    part_match = re.search(r"WW - ([A-Za-z0-9]+)", source_mat.name)
+                    part_name = part_match.group(1) if part_match else "Main"
+
+                    outline_mat_name = f"WW - Outlines {part_name} {mesh_name}"
+                    outline_mat = (
+                        bpy.data.materials.get(outline_mat_name)
+                        or bpy.data.materials.get("WW - Outlines").copy()
+                    )
+                    outline_mat.name = outline_mat_name
+
+                    modifier[f"Input_{mask}"] = source_mat
+                    modifier[f"Input_{mat}"] = outline_mat
+                else:
+                    modifier[f"Input_{mask}"] = None
+                    modifier[f"Input_{mat}"] = None
             modifier.show_viewport = ctx.scene.outlines_enabled
 
         elif base_name == "ResonatorStar Move":
